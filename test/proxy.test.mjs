@@ -130,7 +130,11 @@ test("validateCustomBase отсекает небезопасные адреса"
 
 test("неизвестный провайдер и не-JSON тело", async () => {
   assert.equal((await handleLlm(post({ "x-provider": "evil", "x-api-key": "k" }), env({}))).status, 400);
-  const bad = new Request("http://x/api/llm", { method: "POST", headers: { "x-api-key": "k" }, body: "not json" });
+  const bad = new Request("http://x/api/llm", {
+    method: "POST",
+    headers: { "x-api-key": "k", "content-type": "application/json" },
+    body: "not json",
+  });
   assert.equal((await handleLlm(bad, env({}))).status, 400);
 });
 
@@ -139,4 +143,96 @@ test("extractJson: обёртки и мусор вокруг", () => {
   assert.deepEqual(extractJson('Вот ответ: {"a":[1,2]} Готово.'), { a: [1, 2] });
   assert.deepEqual(extractJson('[{"x":1}]'), [{ x: 1 }]);
   assert.throws(() => extractJson("без json"));
+});
+
+// --- Регрессии второго раунда ревью --------------------------------------------------------------------
+test("отмена клиентом доходит до запроса к провайдеру", async () => {
+  const ctl = new AbortController();
+  let seen;
+  const m = mockFetch(
+    (url, init) =>
+      new Promise((_, reject) => {
+        seen = init.signal;
+        init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }),
+  );
+  try {
+    const req = new Request("http://x/api/llm", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": "k" },
+      body: "{}",
+      signal: ctl.signal,
+    });
+    const pending = handleLlm(req, env({}));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(seen && !seen.aborted);
+    ctl.abort();
+    const res = await pending;
+    assert.equal(res.status, 502, "ошибка связи, а не зависание");
+    assert.ok(seen.aborted, "сигнал провайдеру отменён");
+  } finally {
+    m.restore();
+  }
+});
+
+test("тело передаётся провайдеру без изменений, юникод не портится", async () => {
+  const m = mockFetch(() => new Response("{}", { status: 200 }));
+  try {
+    const body = JSON.stringify({ model: "m", messages: [{ role: "user", content: "Платье «миди» 👗 \u0000 \n" }] });
+    await handleLlm(post({ "x-api-key": "k" }, JSON.parse(body)), env({}));
+    assert.equal(m.calls[0].init.body, body);
+  } finally {
+    m.restore();
+  }
+});
+
+test("слишком большое тело: 413 и по заголовку, и по факту", async () => {
+  const m = mockFetch(() => new Response("{}", { status: 200 }));
+  try {
+    const huge = "x".repeat(6 * 1024 * 1024);
+    const byHeader = new Request("http://x/api/llm", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": "k", "content-length": String(huge.length + 20) },
+      body: JSON.stringify({ a: "y" }),
+    });
+    assert.equal((await handleLlm(byHeader, env({}))).status, 413);
+    assert.equal((await handleLlm(post({ "x-api-key": "k" }, { a: huge }), env({}))).status, 413);
+    assert.equal(m.calls.length, 0, "провайдеру ничего не ушло");
+  } finally {
+    m.restore();
+  }
+});
+
+test("не JSON по Content-Type и кросс-сайтовые запросы отклоняются до обращения к провайдеру", async () => {
+  const m = mockFetch(() => new Response("{}", { status: 200 }));
+  try {
+    const plain = new Request("http://x/api/llm", {
+      method: "POST",
+      headers: { "content-type": "text/plain", "x-api-key": "k" },
+      body: "{}",
+    });
+    assert.equal((await handleLlm(plain, env({}))).status, 415);
+    const none = new Request("http://x/api/llm", { method: "POST", headers: { "x-api-key": "k" }, body: "{}" });
+    assert.equal((await handleLlm(none, env({}))).status, 415);
+    assert.equal((await handleLlm(post({ "x-api-key": "k", "sec-fetch-site": "cross-site" }), env({}))).status, 403);
+    assert.equal((await handleLlm(post({ "x-api-key": "k", "sec-fetch-site": "same-origin" }), env({}))).status, 200);
+    assert.equal(m.calls.length, 1);
+  } finally {
+    m.restore();
+  }
+});
+
+test("validateCustomBase: точка на конце и внутренние суффиксы", () => {
+  for (const bad of [
+    "https://localhost./v1",
+    "https://svc.internal./v1",
+    "https://printer.lan/v1",
+    "https://nas.home.arpa/v1",
+    "https://wiki.corp/v1",
+    "https://a.intranet/v1",
+    "https://x.private/v1",
+  ]) {
+    assert.throws(() => validateCustomBase(bad), undefined, bad);
+  }
+  assert.equal(validateCustomBase("https://api.example.com./v1"), "https://api.example.com./v1");
 });

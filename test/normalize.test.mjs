@@ -28,10 +28,10 @@ test("анализ: строка вместо списка и null в масси
     a.color_type.best_colors.map((c) => [c.name, c.hex]),
     [
       ["Роза", "#c9929c"],
-      ["Серый", "#cccccc"],
+      ["Серый", ""],
     ],
   );
-  assert.equal(a.styles.length, 1);
+  assert.equal(a.styles.length, 2, "строка в списке стилей становится названием");
   assert.deepEqual(a.silhouettes, []);
   const brief = profileBrief({ profile: { inputs: {}, analysis: a } });
   assert.match(brief, /Лето/);
@@ -222,7 +222,7 @@ test("миграция: сохранённое в кривой форме при
     ...defaultState(),
     wardrobe: [{ id: "w1", name: "A" }, null, "x", { id: "w2", name: "B" }],
     profile: {
-      photos: ["data:x", 5, null],
+      photos: ["data:image/png;base64,iVBORw0KGgo=", 5, null],
       inputs: null,
       analysis: { color_type: { season: "Лето", best_colors: "x" }, body: { goals: "a;b" } },
     },
@@ -232,11 +232,11 @@ test("миграция: сохранённое в кривой форме при
   };
   migrate(st);
   assert.equal(st.wardrobe.length, 2);
-  assert.deepEqual(st.profile.photos, ["data:x"]);
+  assert.deepEqual(st.profile.photos, ["data:image/png;base64,iVBORw0KGgo="]);
   assert.deepEqual(st.profile.inputs, {});
   assert.deepEqual(st.profile.analysis.body.goals, ["a", "b"]);
   assert.equal(st.looks.length, 1);
-  assert.deepEqual(st.capsule.keep, [{ id: "w1", role: "" }]);
+  assert.deepEqual(st.capsule.keep, [{ id: "w1", role: "", reason: "" }]);
   assert.equal(st.capsule.buy[0].id, "b1");
   assert.deepEqual(Object.keys(st.search), ["a"]);
 
@@ -255,4 +255,111 @@ test("миграция: сохранённое в кривой форме при
 test("аналитический результат нормализуется идемпотентно", () => {
   const once = N.normalizeAnalysis(goodAnalysis);
   assert.deepEqual(N.normalizeAnalysis(once), once);
+});
+
+// --- Регрессии второго раунда ревью --------------------------------------------------------------------
+test("причина отказа в drop сохраняется, а role и reason взаимозаменяемы", () => {
+  const valid = new Set(["w1", "w2", "w3"]);
+  const c = N.normalizeCapsule(
+    {
+      buy: [{ name: "x" }],
+      keep: [{ id: "w1", reason: "база" }],
+      drop: [
+        { id: "w2", reason: "дублирует" },
+        { id: "w3", role: "лишнее" },
+      ],
+    },
+    valid,
+  );
+  assert.equal(c.drop[0].reason, "дублирует");
+  assert.equal(c.drop[1].reason, "лишнее");
+  assert.equal(c.keep[0].role, "база");
+  assert.deepEqual(N.normalizeCapsule(c, valid), c, "идемпотентно");
+});
+
+test("text(): массив строк склеивается, а не стирается", () => {
+  assert.equal(N.text(["шерсть", "хлопок", null, ""]), "шерсть; хлопок");
+  assert.equal(N.text({ a: 1 }), "");
+  assert.equal(N.normalizeItem({ name: "Свитер", material: ["шерсть", "акрил"], notes: ["крупная вязка"] }).material, "шерсть; акрил");
+});
+
+test("анализ: пустой цветотип при остальном содержимом не отбрасывает всё", () => {
+  const a = N.normalizeAnalysis({ color_type: {}, body: { figure_type: "груша" }, summary: "Носите приталенное" });
+  assert.equal(a.body.figure_type, "груша");
+  assert.equal(a.summary, "Носите приталенное");
+  assert.throws(() => N.normalizeAnalysis({ color_type: {}, body: {} }), /неполный/);
+});
+
+test("hex: выдуманный серый не попадает ни в данные, ни в промпт", () => {
+  assert.equal(N.colors([{ name: "Роза" }])[0].hex, "");
+  const brief = profileBrief({
+    profile: {
+      inputs: {},
+      analysis: N.normalizeAnalysis({ color_type: { season: "Лето", best_colors: [{ name: "Роза" }] }, body: { figure_type: "x" } }),
+    },
+  });
+  assert.doesNotMatch(brief, /#cccccc/);
+  assert.match(brief, /Лучшие цвета: Роза$/m);
+});
+
+test("аналогично для покупок капсулы", () => {
+  const c = N.normalizeCapsule({ buy: [{ name: "Рубашка" }] }, new Set());
+  assert.equal(c.buy[0].color_hex, "");
+});
+
+test("картинки: только data URL растровых форматов", async () => {
+  const { safeImage } = await import("../public/js/util.js");
+  const ok = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+  assert.equal(safeImage(ok), ok);
+  for (const bad of [
+    'x" onerror="alert(1)',
+    "javascript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    "data:image/svg+xml;base64,PHN2Zz4=",
+    ok + '"onload="x',
+    5,
+    null,
+    "",
+  ]) {
+    assert.equal(safeImage(bad), "", String(bad));
+  }
+});
+
+test("миграция чистит чужие картинки и id вещей", () => {
+  const ok = "data:image/png;base64,iVBORw0KGgo=";
+  const st = {
+    ...defaultState(),
+    wardrobe: [
+      { id: "w1", name: "A", image: 'x" onerror="alert(1)' },
+      { id: "w2", name: "B", image: ok },
+    ],
+    profile: { photos: [ok, "javascript:alert(1)"], inputs: {}, analysis: null },
+  };
+  migrate(st);
+  assert.equal(st.wardrobe[0].image, "");
+  assert.equal(st.wardrobe[1].image, ok);
+  assert.deepEqual(st.profile.photos, [ok]);
+});
+
+test("importData проходит миграцию и отклоняет не-копии", async () => {
+  const { importData, state } = await import("../public/js/store.js");
+  globalThis.indexedDB = undefined;
+  await assert.rejects(importData("{}"), /не файл резервной копии/);
+  await assert.rejects(importData('{"state":"строка"}'), /не файл резервной копии/);
+  const ok = "data:image/png;base64,iVBORw0KGgo=";
+  const backup = JSON.stringify({
+    version: 1,
+    state: {
+      wardrobe: [{ id: "w1", name: "A", image: "bad" }],
+      profile: { photos: [ok, "bad"], inputs: {}, analysis: { color_type: { season: "Лето", best_colors: "x" }, body: { goals: "a;b" } } },
+    },
+  });
+  try {
+    await importData(backup);
+  } catch (e) {
+    if (!/indexedDB|IDB|open/i.test(String(e))) throw e; // в node нет IndexedDB: проверяем состояние, а не запись
+  }
+  assert.equal(state.wardrobe[0].image, "");
+  assert.deepEqual(state.profile.photos, [ok]);
+  assert.deepEqual(state.profile.analysis.body.goals, ["a", "b"]);
 });

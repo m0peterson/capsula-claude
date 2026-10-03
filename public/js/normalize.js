@@ -1,13 +1,22 @@
 // Приведение ответов модели к форме, с которой работает интерфейс.
 // Модель может вернуть строку вместо списка, null внутри массива, число вместо текста. Всё это отсекается здесь,
 // до сохранения в state: иначе один кривой ответ ломает вкладку и после перезагрузки.
-import { arr, isRecord, safeHex } from "./util.js";
+import { arr, isRecord } from "./util.js";
 
 export const CATEGORY_KEYS = ["top", "bottom", "dress", "outerwear", "shoes", "bag", "accessory", "other"];
 const PRIORITIES = ["high", "medium", "low"];
 const HEX_IN_TEXT = /#[0-9a-f]{3,8}\b/i;
 
-export const text = (v) => (typeof v === "string" ? v.trim() : typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+export function text(v) {
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  // Массив строк вместо строки (например, «ткани» списком): не стираем, склеиваем.
+  if (Array.isArray(v)) return v.map(text).filter(Boolean).join("; ");
+  return "";
+}
+
+// hex только если он настоящий: выдуманный серый в промпты и данные не пишем.
+const validHex = (h) => (/^#[0-9a-f]{3,8}$/i.test(text(h)) ? text(h) : "");
 
 export const records = (v) => arr(v).filter(isRecord);
 
@@ -36,7 +45,7 @@ export function colors(v) {
       if (isRecord(c)) {
         const hex = text(c.hex) || text(c.color_hex);
         const name = text(c.name) || text(c.color) || hex;
-        return name ? { name, hex: safeHex(hex), role: text(c.role) } : null;
+        return name ? { name, hex: validHex(hex), role: text(c.role) } : null;
       }
       const s = typeof c === "string" ? c.trim() : "";
       if (!s) return null;
@@ -45,7 +54,7 @@ export function colors(v) {
         .replace(HEX_IN_TEXT, "")
         .replace(/[()\s]+$/, "")
         .trim();
-      return { name: name || s, hex: safeHex(m?.[0]), role: "" };
+      return { name: name || s, hex: validHex(m?.[0]), role: "" };
     })
     .filter(Boolean);
 }
@@ -69,10 +78,8 @@ export function normalizeAnalysis(data) {
     avoid_colors: colors(c.avoid_colors),
     metals: text(c.metals),
   };
-  if (!color_type.season && !color_type.best_colors.length) throw incomplete("цветотип не определён");
-
   const h = Number(b.height_cm);
-  return {
+  const result = {
     color_type,
     body: {
       height_cm: Number.isFinite(h) && h > 80 && h < 250 ? Math.round(h) : null,
@@ -83,15 +90,30 @@ export function normalizeAnalysis(data) {
       confidence: text(b.confidence).toLowerCase(),
       notes: text(b.notes),
     },
-    styles: records(data.styles)
+    styles: arr(data.styles)
+      .map((s) => (isRecord(s) ? s : typeof s === "string" ? { name: s } : null))
+      .filter(Boolean)
       .map((s) => ({ name: text(s.name), description: text(s.description), why: text(s.why) }))
       .filter((s) => s.name || s.description),
-    silhouettes: records(data.silhouettes)
+    silhouettes: arr(data.silhouettes)
+      .map((s) => (isRecord(s) ? s : typeof s === "string" ? { recommend: s } : null))
+      .filter(Boolean)
       .map((s) => ({ zone: text(s.zone), recommend: text(s.recommend), avoid: text(s.avoid) }))
       .filter((s) => s.zone || s.recommend),
     fabrics_prints: text(data.fabrics_prints),
     summary: text(data.summary),
   };
+  // Отклоняем, только если в ответе нет вообще ничего полезного. Пустой цветотип при остальном содержимом это не повод всё выбросить.
+  const useful =
+    result.color_type.season ||
+    result.color_type.best_colors.length ||
+    result.body.figure_type ||
+    result.body.proportions ||
+    result.styles.length ||
+    result.silhouettes.length ||
+    result.summary;
+  if (!useful) throw incomplete("в анализе нет ни цветотипа, ни фигуры, ни стилей");
+  return result;
 }
 
 // Одна распознанная вещь. null, если это не объект или у него нет названия.
@@ -148,9 +170,14 @@ export function normalizeLooks(data, validIds) {
     .filter((l) => l.item_ids.length >= 2);
 }
 
+// keep ждёт role, drop ждёт reason: модель может перепутать, поэтому сохраняем оба поля одним текстом.
 function idRoles(v, validIds) {
   return arr(v)
-    .map((x) => (isRecord(x) ? { id: text(x.id), role: text(x.role) || text(x.reason) } : { id: text(x), role: "" }))
+    .map((x) => {
+      if (!isRecord(x)) return { id: text(x), role: "", reason: "" };
+      const why = text(x.role) || text(x.reason);
+      return { id: text(x.id), role: why, reason: text(x.reason) || why };
+    })
     .filter((x) => validIds.has(x.id));
 }
 
@@ -172,7 +199,7 @@ export function normalizeCapsule(data, validIds) {
         name: b.name.slice(0, 160),
         category: CATEGORY_KEYS.includes(category) ? category : "other",
         color: text(b.color),
-        color_hex: safeHex(text(b.color_hex)),
+        color_hex: validHex(b.color_hex),
         description: text(b.description),
         why: text(b.why),
         pairs_with: ids(b.pairs_with),

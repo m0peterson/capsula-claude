@@ -10,6 +10,10 @@ export const safeHex = (h) => {
   return /^#[0-9a-f]{3,8}$/i.test(s) ? s : "#cccccc";
 };
 
+// Картинки приложения это только data URL растровых форматов. Всё остальное (в том числе из импортированной копии)
+// нельзя подставлять в src: через кавычку в значении можно дописать атрибут и выполнить свой скрипт.
+export const safeImage = (u) => (typeof u === "string" && /^data:image\/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(u) ? u : "");
+
 export const safeUrl = (u) => {
   try {
     const url = new URL(String(u));
@@ -53,17 +57,20 @@ const MAX_STARTS = 64;
 const MAX_REPAIRS = 4;
 
 // Начала значений в тексте. Закрытый кусок пропускаем целиком: вложенное не интересно, иначе оборванный
-// ответ превращается во вложенный объект. Незакрытую скобку концом не считаем: после неё может идти ответ.
+// ответ превращается во вложенный объект. Незакрытую скобку концом не считаем: после неё может идти ответ,
+// но всё, что найдено дальше, помечается nested: оно может оказаться лишь кусочком оборванного корня.
 function startsOf(src) {
   const out = [];
   const re = /[{[]/g;
   let from = 0;
+  let open = false;
   while (out.length < MAX_STARTS) {
     re.lastIndex = from;
     const m = re.exec(src);
     if (!m) break;
-    out.push(m.index);
+    out.push({ start: m.index, nested: open });
     const end = balancedEnd(src, m.index);
+    if (end < 0) open = true;
     from = end < 0 ? m.index + 1 : end + 1;
   }
   return out;
@@ -104,8 +111,10 @@ function stripThink(t) {
   }
   out += t.slice(pos);
   // Открывающий тег у некоторых провайдеров срезан: всё до одиночного закрывающего это рассуждения.
+  // Но если до тега уже есть что-то похожее на JSON ("ключ":), тег стоит в самом ответе, и резать нельзя.
   const stray = /<\/(?:think|thinking|reasoning)>/i.exec(out);
-  return stray ? out.slice(stray.index + stray[0].length) : out;
+  if (!stray || /"[^"\n]{1,60}"\s*:/.test(out.slice(0, stray.index))) return out;
+  return out.slice(stray.index + stray[0].length);
 }
 
 // Разбирает JSON из ответа модели и сообщает, пришлось ли его чинить.
@@ -114,7 +123,8 @@ function stripThink(t) {
 //
 // Кандидатов собираем со всех начал и источников и выбираем лучшего. Сноска «[1]» или «{}» в прозе тоже
 // валидный JSON, поэтому «первый разобравшийся» не годится. Лучший: больше всего ожидаемых ключей корня
-// (opts.expect), потом объект, а не массив, потом больший размер, потом нечинённый.
+// (opts.expect), потом не вложенный в незакрытую скобку, потом объект, а не массив, потом больший размер,
+// потом нечинённый. Поле nested в результате говорит, что ответ найден внутри незакрытой скобки.
 export function parseModelJson(text, { expect = [] } = {}) {
   const raw = String(text ?? "");
   const t = stripThink(raw);
@@ -126,7 +136,7 @@ export function parseModelJson(text, { expect = [] } = {}) {
 
   for (const src of sources) {
     let repairs = 0;
-    for (const start of startsOf(src)) {
+    for (const { start, nested } of startsOf(src)) {
       const last = src.lastIndexOf(src[start] === "{" ? "}" : "]");
       const end = balancedEnd(src, start);
       const balanced = end >= 0 ? src.slice(start, end + 1) : null;
@@ -142,7 +152,9 @@ export function parseModelJson(text, { expect = [] } = {}) {
           note(e);
         }
       }
-      if (!found && repairs < MAX_REPAIRS) {
+      // Ремонт дорогой, а бюджет мал: тратим его только на куски, похожие на JSON. Проза со скобками вроде
+      // «[x]» или «{пример}» кавычек и двоеточий не содержит.
+      if (!found && repairs < MAX_REPAIRS && /["':]/.test(balanced ?? src.slice(start, start + 400))) {
         repairs++;
         for (const slice of new Set([src.slice(start), toLast, balanced])) {
           if (slice === null) continue;
@@ -157,7 +169,7 @@ export function parseModelJson(text, { expect = [] } = {}) {
           }
         }
       }
-      if (found && found.value !== null && typeof found.value === "object") candidates.push(found);
+      if (found && found.value !== null && typeof found.value === "object") candidates.push({ ...found, nested });
     }
   }
 
@@ -174,18 +186,27 @@ export function parseModelJson(text, { expect = [] } = {}) {
       return {
         value,
         repaired: c.repaired,
+        nested: c.nested,
         plausible: isRec ? Object.keys(value).length > 0 : value.some((x) => x !== null && typeof x === "object"),
         hits: isRec ? expect.filter((k) => k in value).length : 0,
         isRec,
         size: JSON.stringify(value).length,
       };
     })
-    .filter((c) => c.plausible)
-    .sort((a, b) => b.hits - a.hits || Number(b.isRec) - Number(a.isRec) || b.size - a.size || Number(a.repaired) - Number(b.repaired));
+    // Фрагмент внутри незакрытой скобки без единого ожидаемого ключа это кусок оборванного ответа, а не ответ.
+    .filter((c) => c.plausible && !(c.nested && expect.length && c.hits === 0))
+    .sort(
+      (a, b) =>
+        b.hits - a.hits ||
+        Number(a.nested) - Number(b.nested) ||
+        Number(b.isRec) - Number(a.isRec) ||
+        b.size - a.size ||
+        Number(a.repaired) - Number(b.repaired),
+    );
 
-  if (scored.length) return { value: scored[0].value, repaired: scored[0].repaired };
+  if (scored.length) return { value: scored[0].value, repaired: scored[0].repaired, nested: scored[0].nested };
   // Единственное, что нашлось: честный пустой объект.
-  const empty = candidates.find((c) => isRecord(c.value) && !c.repaired);
+  const empty = candidates.find((c) => isRecord(c.value) && Object.keys(c.value).length === 0 && !c.repaired && !c.nested);
   if (empty) return { value: empty.value, repaired: false };
   throw jsonError(raw, firstError);
 }

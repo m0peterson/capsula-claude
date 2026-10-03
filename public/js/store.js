@@ -2,7 +2,7 @@
 // На сервер ничего не сохраняется.
 
 import { normalizeAnalysis, normalizeLooks, normalizeCapsule, normalizeSearch } from "./normalize.js";
-import { isRecord } from "./util.js";
+import { isRecord, safeImage } from "./util.js";
 
 const DB_NAME = "capsula";
 const STORE = "kv";
@@ -73,10 +73,12 @@ export function migrate(st) {
       return null;
     }
   };
-  const ids = new Set((Array.isArray(st.wardrobe) ? st.wardrobe : []).filter(isRecord).map((w) => w.id));
-  st.wardrobe = (Array.isArray(st.wardrobe) ? st.wardrobe : []).filter(isRecord);
+  st.wardrobe = (Array.isArray(st.wardrobe) ? st.wardrobe : [])
+    .filter(isRecord)
+    .map((w) => ({ ...w, id: String(w.id ?? ""), image: safeImage(w.image) }));
+  const ids = new Set(st.wardrobe.map((w) => w.id));
   st.profile = isRecord(st.profile) ? st.profile : defaultState().profile;
-  st.profile.photos = Array.isArray(st.profile.photos) ? st.profile.photos.filter((p) => typeof p === "string") : [];
+  st.profile.photos = Array.isArray(st.profile.photos) ? st.profile.photos.filter((p) => safeImage(p)) : [];
   st.profile.inputs = isRecord(st.profile.inputs) ? st.profile.inputs : {};
   if (st.profile.analysis) st.profile.analysis = attempt("анализ", () => normalizeAnalysis(st.profile.analysis));
   st.looks = attempt("образы", () => normalizeLooks({ looks: st.looks }, ids)) || [];
@@ -153,8 +155,16 @@ export async function resetAll() {
 export const exportData = () => JSON.stringify({ version: 1, state }, null, 1);
 
 export async function importData(text) {
-  const parsed = JSON.parse(text);
-  if (!parsed?.state) throw new Error("Это не файл резервной копии Capsula");
-  Object.assign(state, defaultState(), parsed.state);
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("Это не файл резервной копии Capsula");
+  }
+  if (!isRecord(parsed?.state)) throw new Error("Это не файл резервной копии Capsula");
+  // Копия может быть из старой версии или составлена вручную: приводим к нынешней форме так же, как при загрузке.
+  const next = { ...defaultState(), ...parsed.state };
+  migrate(next);
+  Object.assign(state, next);
   await idbSet("state", JSON.parse(JSON.stringify(state)));
 }

@@ -69,7 +69,7 @@ async function readError(res) {
 
 // Необязательные параметры: если провайдер называет такой параметр в ошибке, отбрасываем именно его.
 const NAMED = {
-  json: /response_format|json_object|json_schema|structured[ _]output/i,
+  json: /response[_ -]?format|json[_ -]?(object|schema|mode|output)|structured[ _-]?outputs?/i,
   maxTokens: /max_tokens|max_completion_tokens/i,
   reasoning: /reasoning|effort/i,
 };
@@ -96,8 +96,20 @@ const DROP_NOTICE = {
 
 // Что провайдер не принимает, помним до перезагрузки страницы, чтобы не слать заведомо отклоняемый запрос
 // (с фото это ещё и до 5 МБ лишнего трафика на каждый вызов).
+const LEARNED_TTL_MS = 30 * 60 * 1000;
 const learned = new Map();
 export const resetLearned = () => learned.clear();
+
+// Решение живёт полчаса: провайдер мог починиться или смениться ключ, а вечно слать урезанный запрос не нужно.
+function recall(key) {
+  const entry = learned.get(key);
+  if (!entry) return {};
+  if (Date.now() - entry.at > LEARNED_TTL_MS) {
+    learned.delete(key);
+    return {};
+  }
+  return entry;
+}
 
 // Один запрос к модели со стримингом. Возвращает { text, annotations, truncated, finish }.
 // Если провайдер отвечает 400/422 на необязательный параметр (reasoning, response_format, лимит токенов),
@@ -107,8 +119,9 @@ export async function chat({ slot, messages, extra = {}, onProgress, onNotice, s
   if (problem) throw new Error(problem);
 
   const { response_format, ...rest } = extra;
-  const key = `${slot.provider}|${slot.model}|${slot.effort}|${slot.maxTokens}`;
-  const memo = learned.get(key) || {};
+  const where = slot.provider === "custom" ? settings.providers.custom?.baseUrl || "" : "";
+  const key = `${slot.provider}|${where}|${slot.model}|${slot.effort}|${slot.maxTokens}`;
+  const memo = recall(key);
   const active = {
     reasoning: Boolean(slot.effort) && memo.reasoning !== false,
     json: Boolean(response_format) && memo.json !== false,
@@ -116,6 +129,7 @@ export async function chat({ slot, messages, extra = {}, onProgress, onNotice, s
     maxField: memo.maxField || "max_tokens",
   };
 
+  const pending = {}; // что отбросили в этом вызове: запоминаем и сообщаем, только если запрос после этого прошёл
   for (let attempt = 0; ; attempt++) {
     const payload = {
       model: slot.model.trim(),
@@ -132,18 +146,23 @@ export async function chat({ slot, messages, extra = {}, onProgress, onNotice, s
       body: JSON.stringify(payload),
       signal,
     });
-    if (res.ok) return readStream(res, onProgress);
+    if (res.ok) {
+      if (Object.keys(pending).length) {
+        learned.set(key, { ...recall(key), ...pending, at: Date.now() });
+        for (const k of Object.keys(pending)) if (k !== "maxField") onNotice?.(DROP_NOTICE[k]);
+      }
+      return readStream(res, onProgress);
+    }
 
     const err = await readError(res);
     const step = attempt < 3 && (res.status === 400 || res.status === 422) ? nextStep(err.detail, active) : null;
     if (!step) throw new Error(`${slot.provider}: ${err.text}`);
     if (step.rename) {
       active.maxField = "max_completion_tokens";
-      learned.set(key, { ...memo, ...learned.get(key), maxField: active.maxField });
+      pending.maxField = active.maxField;
     } else {
       active[step.drop] = false;
-      learned.set(key, { ...memo, ...learned.get(key), [step.drop]: false });
-      onNotice?.(DROP_NOTICE[step.drop]);
+      pending[step.drop] = false;
     }
   }
 }
@@ -151,12 +170,15 @@ export async function chat({ slot, messages, extra = {}, onProgress, onNotice, s
 // Завершения, после которых ответ считается целым. Всё остальное (length, content_filter, error, ...) это обрыв.
 const COMPLETE_FINISH = /^(stop|end_turn|stop_sequence|tool_calls|function_call|completed|eos|eos_token)$/i;
 
+// Завершения «упёрлись в лимит токенов»: у разных провайдеров называются по-разному.
+const LENGTH_FINISH = /^(length|max_tokens|max_output_tokens|model_length)$/i;
+
 const errText = (e) => (typeof e === "string" ? e : e?.message || JSON.stringify(e));
 
 // Ошибка «ответ не дошёл целиком». Данные потеряны, поэтому чинить такой ответ нельзя.
 export function cutError({ finish, text = "" }) {
   let message;
-  if (finish === "length") {
+  if (LENGTH_FINISH.test(finish || "")) {
     message =
       "Ответ модели обрезан: исчерпан лимит токенов (рассуждения тоже тратят лимит). Задайте или увеличьте «Лимит ответа» либо снизьте effort в настройках.";
   } else if (finish) {
@@ -227,25 +249,31 @@ async function readStream(res, onProgress) {
 
   try {
     for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (e) {
+        // Соединение порвалось посреди ответа (таймаут функции, сброс сокета). Отмену пользователем не прячем.
+        if (e?.name === "AbortError") throw e;
+        readFailure = e;
+        console.warn("Поток ответа оборвался:", e);
+        break;
+      }
+      if (chunk.done) break;
+      buf += decoder.decode(chunk.value, { stream: true });
       let nl;
       while ((nl = buf.indexOf("\n")) >= 0) {
         handle(buf.slice(0, nl).trim());
         buf = buf.slice(nl + 1);
       }
     }
-    if (buf.trim()) handle(buf.trim());
-  } catch (e) {
-    // Соединение порвалось посреди ответа (таймаут функции, сброс сокета). Отмену пользователем не прячем.
-    if (e?.name === "AbortError" || e?.raw !== undefined) throw e;
-    readFailure = e;
-    console.warn("Поток ответа оборвался:", e);
+    if (!readFailure && buf.trim()) handle(buf.trim());
+  } finally {
+    reader.cancel().catch(() => {}); // при ошибке разбора чанка или отмене не оставляем соединение висеть
   }
 
   // Поток без finish_reason и без [DONE] оборвался: таймаут функции хостинга, разрыв соединения.
-  const complete = finish ? COMPLETE_FINISH.test(finish) : sawDone && !readFailure;
+  const complete = finish ? COMPLETE_FINISH.test(finish) : sawDone;
   const truncated = !complete;
   if (!text.trim()) {
     if (truncated) throw cutError({ finish, text });
@@ -268,7 +296,7 @@ function parseResult(result, expect) {
     if (result.truncated) throw cutError(result);
     throw e;
   }
-  if (parsed.repaired && result.truncated) throw cutError(result);
+  if ((parsed.repaired || parsed.nested) && result.truncated) throw cutError(result);
   if (parsed.repaired) console.warn("Ответ модели был невалидным JSON, исправлен автоматически");
   return parsed.value;
 }

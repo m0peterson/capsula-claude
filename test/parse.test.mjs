@@ -157,3 +157,56 @@ test("скорость: ответы около 200 КБ и патологиче
   assert.throws(() => timed("много think", () => parseModelJson("<think>".repeat(20_000))));
   assert.throws(() => timed("много скобок", () => parseModelJson("[".repeat(100_000))));
 });
+
+// --- Регрессии второго раунда ревью --------------------------------------------------------------------
+const ITEMS = Array.from({ length: 5 }, (_, i) => ({ index: i + 1, name: `Вещь ${i}`, category: "top" }));
+const WRAP = { expect: ["items"] };
+
+test("оборванный голый массив чинится целиком и помечается починенным", () => {
+  const text = JSON.stringify(ITEMS);
+  const cut = text.slice(0, text.length - 25);
+  const r = parseModelJson(cut, WRAP);
+  assert.equal(r.repaired, true);
+  assert.ok(Array.isArray(r.value) && r.value.length >= 4, `получено ${JSON.stringify(r.value).slice(0, 80)}`);
+});
+
+test("голый массив с нечётной кавычкой не превращается в одну запись", () => {
+  const odd = '[{"index":1,"name":"Сапоги","notes":"каблук 3" высота"},{"index":2,"name":"Платье"},{"index":3,"name":"Юбка"}]';
+  const r = parseModelJson(odd, WRAP);
+  assert.ok(Array.isArray(r.value) && r.value.length === 3);
+  assert.equal(r.repaired, true);
+});
+
+test("непочиняемая кавычка: фрагмент внутри незакрытой скобки не принимается, чтобы сработал повтор", () => {
+  const odd = JSON.stringify({ items: ITEMS }).replace('"Вещь 1"', '"Вещь 5" 1"');
+  assert.throws(() => parseModelJson(odd, WRAP));
+  // Битый ответ с хвостовой прозой, содержащей скобки, починить нельзя. Старый парсер тоже падал,
+  // но фрагмент из середины как ответ принимать нельзя: нужен повтор запроса.
+  const brokenWithTail =
+    '{"items":[{"index":1,"name":"Сапоги","notes":"каблук 3" высота"},{"index":2,"name":"Платье"}]}\nЕсли нужно {уточнить} — пишите';
+  assert.throws(() => parseModelJson(brokenWithTail, WRAP));
+});
+
+test("результат из вложенного фрагмента помечается nested", () => {
+  const r = parseModelJson(`Анализ [фото:\n${J}`, EXPECT);
+  assert.deepEqual(r.value, JV);
+  assert.equal(r.nested, true);
+  assert.equal(parseModelJson(J, EXPECT).nested, false);
+});
+
+test("чеклист в прозе не съедает бюджет ремонта битого ответа", () => {
+  const broken = '{"color_type":{"season":"он сказал "осень" мне"},"body":{"type":"груша"},"summary":"ok"}';
+  const prose = "Проверено:\n- [x] цветотип\n- [x] фигура\n- [x] стили\n- [x] силуэты\n- [x] итог\n\nИтог:\n";
+  const r = parseModelJson(prose + broken, EXPECT);
+  assert.equal(r.repaired, true);
+  assert.equal(r.value.color_type.season, 'он сказал "осень" мне');
+});
+
+test("одиночный </think> внутри самого ответа не стирает начало ответа", () => {
+  const a = JSON.stringify({ color_type: { season: "осень", reasoning: "теги </think> в тексте" }, body: { type: "груша" }, summary: "x" });
+  const r = parseModelJson(a, EXPECT);
+  assert.equal(r.value.color_type.season, "осень");
+  assert.equal(r.value.summary, "x");
+  // а настоящий одиночный закрывающий тег после рассуждений по-прежнему срезается
+  assert.deepEqual(parseModelJson(`рассуждение [1] {x}</think>\n${J}`, EXPECT).value, JV);
+});

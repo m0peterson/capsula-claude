@@ -3,7 +3,7 @@ import { chatJson, slotProblem } from "../llm.js";
 import { WARDROBE_SYSTEM } from "../prompts.js";
 import { esc, arr, uid, fileToDataUrl } from "../util.js";
 import { recognizedItems } from "../normalize.js";
-import { runTask, thumb, toast, readImages, CATEGORIES, emptyState } from "../ui.js";
+import { runTask, thumb, toast, readImages, CATEGORIES, emptyState, isRunning, RUNNING_NOTE } from "../ui.js";
 
 const BATCH = 6;
 
@@ -11,7 +11,7 @@ function card(w) {
   const cats = Object.entries(CATEGORIES)
     .map(([k, v]) => `<option value="${k}" ${k === w.category ? "selected" : ""}>${v}</option>`)
     .join("");
-  return `<article class="item" data-id="${w.id}">
+  return `<article class="item" data-id="${esc(w.id)}">
     ${thumb(w)}
     <div class="item-body">
       <input data-f="name" value="${esc(w.name)}" aria-label="Название">
@@ -35,7 +35,7 @@ export function render(root) {
       <label class="drop small"><input type="file" accept="image/*" multiple hidden data-add><span>+ Добавить фото вещей</span></label>
       <button type="button" class="primary" data-recognize ${fresh.length ? "" : "disabled"}>Распознать новые (${fresh.length})</button>
     </div>
-    <div data-status></div>
+    <div data-status data-task="wardrobe"></div>
   </section>
   <div data-list></div>`;
 
@@ -52,7 +52,7 @@ export function render(root) {
       : emptyState("Гардероб пока пуст. Добавьте фото вещей, чтобы получить образы и капсулу.");
     const left = items.filter((w) => !w.recognized).length;
     recBtn.textContent = `Распознать новые (${left})`;
-    recBtn.disabled = !left;
+    recBtn.disabled = !left || isRunning("wardrobe");
     countEl.textContent = items.length;
     listEl.querySelectorAll(".item").forEach((el) => {
       const w = items.find((x) => x.id === el.dataset.id);
@@ -72,6 +72,7 @@ export function render(root) {
     });
   }
   paintList();
+  if (isRunning("wardrobe")) statusEl.innerHTML = RUNNING_NOTE;
 
   readImages(root.querySelector("[data-add]"), async (files) => {
     const failed = [];

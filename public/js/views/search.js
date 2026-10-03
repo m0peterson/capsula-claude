@@ -4,7 +4,7 @@ import { SEARCH_SYSTEM } from "../prompts.js";
 import { SHOPS } from "../shops.js";
 import { esc, arr, safeUrl, isRecord } from "../util.js";
 import { normalizeSearch } from "../normalize.js";
-import { runTask, toast, catLabel, emptyState, safeHtml } from "../ui.js";
+import { runTask, toast, catLabel, emptyState, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
 
 function resultsHtml(entry) {
   if (!entry) return "";
@@ -48,7 +48,7 @@ export function render(root, ctx) {
     <h3>Найти конкретные модели с помощью ИИ</h3>
     <p class="muted">Модель сама ищет в интернете и приносит ссылки на товары с описанием. ${settings.stylist.provider === "openrouter" ? "" : `<strong>Работает только с OpenRouter, у вас в слоте стилиста выбран другой провайдер.</strong>`}</p>
     <div class="row"><button type="button" class="primary" data-ai ${settings.stylist.provider === "openrouter" ? "" : "disabled"}>Искать с ИИ</button></div>
-    <div data-status></div>
+    <div data-status data-task="search"></div>
     <div data-results></div>
   </section>`;
 
@@ -77,6 +77,10 @@ export function render(root, ctx) {
   });
 
   const btn = root.querySelector("[data-ai]");
+  if (isRunning("search")) {
+    btn.disabled = true;
+    root.querySelector("[data-status]").innerHTML = RUNNING_NOTE;
+  }
   btn.addEventListener("click", async () => {
     const text = q.value.trim();
     if (!text) return toast("Введите запрос", "error");

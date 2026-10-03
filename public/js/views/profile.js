@@ -2,7 +2,8 @@ import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { ANALYSIS_SYSTEM } from "../prompts.js";
 import { esc, arr, fileToDataUrl } from "../util.js";
-import { runTask, swatches, toast, readImages, safeHtml } from "../ui.js";
+import { runTask, swatches, toast, readImages, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
+import { safeImage } from "../util.js";
 import { normalizeAnalysis } from "../normalize.js";
 
 const MAX_PHOTOS = 3;
@@ -80,7 +81,7 @@ export function render(root) {
     <h2>Ваше фото</h2>
     <p class="muted">Нужно 1-3 фото при дневном свете без фильтров: лицо крупно и в полный рост. Чем честнее свет, тем точнее цветотип. Фото хранятся только в вашем браузере и уходят к модели лишь при анализе.</p>
     <div class="photos">
-      ${profile.photos.map((p, i) => `<div class="photo"><img src="${p}" alt="Фото ${i + 1}"><button type="button" class="x" data-rm="${i}" aria-label="Удалить">×</button></div>`).join("")}
+      ${profile.photos.map((p, i) => `<div class="photo"><img src="${esc(safeImage(p))}" alt="Фото ${i + 1}"><button type="button" class="x" data-rm="${i}" aria-label="Удалить">×</button></div>`).join("")}
       ${profile.photos.length < MAX_PHOTOS ? `<label class="drop small"><input type="file" accept="image/*" multiple hidden data-photos><span>+ Фото</span></label>` : ""}
     </div>
     <div class="form">${FIELDS.map(fieldHtml).join("")}</div>
@@ -88,7 +89,7 @@ export function render(root) {
       <textarea data-wishes rows="3" placeholder="Например: деловой кэжуал, минимализм, без каблуков, хочу выглядеть выше">${esc(state.wishes)}</textarea>
     </label>
     <div class="row"><button type="button" class="primary" data-analyze>Проанализировать</button></div>
-    <div data-status></div>
+    <div data-status data-task="profile"></div>
   </section>
   <div data-result>${safeHtml(() => renderAnalysis(profile.analysis))}</div>`;
 
@@ -121,6 +122,11 @@ export function render(root) {
 
   const btn = root.querySelector("[data-analyze]");
   const resultEl = root.querySelector("[data-result]");
+  if (isRunning("profile")) {
+    btn.disabled = true;
+    root.querySelector("[data-status]").innerHTML = RUNNING_NOTE;
+  }
+
   btn.addEventListener("click", async () => {
     const status = root.querySelector("[data-status]");
     const problem = slotProblem(settings.vision);

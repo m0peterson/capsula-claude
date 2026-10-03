@@ -44,4 +44,8 @@ function route() {
 await init();
 ctx.serverConfig = await fetchServerConfig();
 window.addEventListener("hashchange", route);
+// Задача закончилась, пока пользователь был на другой вкладке и вернулся: перерисовываем её с готовым результатом.
+window.addEventListener("capsula:refresh", (e) => {
+  if ((location.hash.replace(/^#/, "").split("/")[0] || "profile") === e.detail.tab) route();
+});
 route();

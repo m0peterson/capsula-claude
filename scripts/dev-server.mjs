@@ -23,6 +23,11 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname === "/api/llm") {
+      // Защита от DNS rebinding: на этот API ходит только страница с localhost.
+      if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+        res.writeHead(403).end("Forbidden host");
+        return;
+      }
       const hasBody = req.method !== "GET" && req.method !== "HEAD";
       // Клиент закрыл соединение до конца ответа: отменяем запрос к провайдеру, как это делает платформа.
       const ctl = new AbortController();

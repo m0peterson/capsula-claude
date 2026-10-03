@@ -2,7 +2,7 @@ import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { LOOKS_SYSTEM, profileBrief, wardrobeBrief } from "../prompts.js";
 import { esc, arr } from "../util.js";
-import { runTask, thumb, toast, emptyState, safeHtml } from "../ui.js";
+import { runTask, thumb, toast, emptyState, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
 import { normalizeLooks } from "../normalize.js";
 
 export function lookCard(look, byId) {
@@ -38,7 +38,7 @@ export function render(root, ctx) {
     </label>
     <label class="field"><span>Сколько образов</span><input type="number" data-count min="3" max="12" value="6"></label>
     <div class="row"><button type="button" class="primary" data-run ${n < 2 ? "disabled" : ""}>Составить образы</button></div>
-    <div data-status></div>
+    <div data-status data-task="looks"></div>
   </section>
   <div class="looks" data-looks></div>`;
   const looksEl = root.querySelector("[data-looks]");
@@ -50,6 +50,10 @@ export function render(root, ctx) {
   });
 
   const btn = root.querySelector("[data-run]");
+  if (isRunning("looks")) {
+    btn.disabled = true;
+    root.querySelector("[data-status]").innerHTML = RUNNING_NOTE;
+  }
   btn.addEventListener("click", async () => {
     const problem = slotProblem(settings.stylist);
     if (problem) return toast(problem, "error");

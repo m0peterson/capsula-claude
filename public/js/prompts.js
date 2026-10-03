@@ -123,7 +123,7 @@ export function profileBrief(state) {
   if (analysis) {
     const c = analysis.color_type;
     const b = analysis.body;
-    const named = (x) => `${x.name} ${x.hex}`;
+    const named = (x) => (x.hex ? `${x.name} ${x.hex}` : x.name);
     lines.push(`Цветотип: ${c.season || "?"} (${c.undertone || "?"}, контраст ${c.contrast || "?"})`);
     if (c.best_colors.length) lines.push(`Лучшие цвета: ${c.best_colors.map(named).join(", ")}`);
     if (c.neutrals.length) lines.push(`Нейтральные: ${c.neutrals.map(named).join(", ")}`);

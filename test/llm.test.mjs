@@ -364,3 +364,107 @@ test(
     assert.equal(m.bodies.length, 1);
   }),
 );
+
+// --- Регрессии второго раунда ревью --------------------------------------------------------------------
+test(
+  "JSON-режим распознаётся по словам «JSON mode» и «response format» с пробелом",
+  run(async () => {
+    const m = mockFetch(errorResponse(400, "This model does not support JSON mode"), jsonStream({ a: 1 }));
+    await ask();
+    assert.equal(m.bodies[1].response_format, undefined);
+    assert.deepEqual(m.bodies[1].reasoning, { effort: "xhigh" }, "reasoning не тронут");
+    resetLearned();
+    const m2 = mockFetch(errorResponse(400, "Invalid response format for this model"), jsonStream({ a: 1 }));
+    await ask();
+    assert.equal(m2.bodies[1].response_format, undefined);
+  }),
+);
+
+test(
+  "неверная догадка не запоминается: если повтор тоже упал, следующий вызов шлёт всё заново",
+  run(async () => {
+    const m = mockFetch(
+      errorResponse(400, "Unsupported value: something not supported"),
+      errorResponse(500, "upstream down"),
+      jsonStream({ a: 1 }),
+    );
+    await assert.rejects(ask(), /upstream down/);
+    await ask();
+    assert.equal(m.bodies.length, 3);
+    assert.deepEqual(m.bodies[2].reasoning, { effort: "xhigh" }, "отказ от reasoning не закрепился");
+  }),
+);
+
+test(
+  "запомненный отказ не переносится на другой адрес своего провайдера",
+  run(async () => {
+    settings.providers.custom.baseUrl = "https://a.example.com/v1";
+    settings.providers.custom.apiKey = "k";
+    const custom = () => ({ provider: "custom", model: "m/x", effort: "xhigh", maxTokens: 0 });
+    const m = mockFetch(errorResponse(400, "Unsupported parameter: response_format"), jsonStream({ a: 1 }), jsonStream({ a: 1 }));
+    await chatJson({ slot: custom(), system: "JSON", user: "q" });
+    settings.providers.custom.baseUrl = "https://b.example.com/v1";
+    await chatJson({ slot: custom(), system: "JSON", user: "q" });
+    assert.ok(m.bodies[2].response_format, "на другом адресе JSON-режим пробуется снова");
+  }),
+);
+
+test(
+  "finish_reason MAX_TOKENS и LENGTH объясняются как лимит токенов, а не фильтр",
+  run(async () => {
+    for (const finish of ["MAX_TOKENS", "LENGTH", "max_output_tokens"]) {
+      mockFetch(sse([delta('{"a":[{"x":1},{"y":"обор', finish)]));
+      await assert.rejects(ask(), (e) => e.truncated && /лимит токенов/.test(e.message), finish);
+    }
+  }),
+);
+
+test(
+  "ошибка чтения после [DONE] не превращает целый ответ в оборванный",
+  run(async () => {
+    const enc = new TextEncoder();
+    const chunks = [`data: ${JSON.stringify(delta('{"a":1}'))}\n\n`, "data: [DONE]\n\n"];
+    let i = 0;
+    mockFetch(
+      new Response(
+        new ReadableStream({
+          pull(c) {
+            if (i < chunks.length) c.enqueue(enc.encode(chunks[i++]));
+            else c.error(new TypeError("terminated"));
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    assert.deepEqual((await ask()).data, { a: 1 });
+  }),
+);
+
+test(
+  "ошибка обработки чанка не выдаётся за обрыв соединения",
+  run(async () => {
+    mockFetch(sse([delta('{"a"'), { error: { message: "Rate limited" } }], { done: false }));
+    await assert.rejects(ask(), (e) => e.message === "Rate limited" && !e.truncated);
+  }),
+);
+
+test(
+  "оборванный голый массив даёт ошибку обрыва, а не «1 вещь из N»",
+  run(async () => {
+    const items = JSON.stringify(Array.from({ length: 5 }, (_, i) => ({ index: i + 1, name: `Вещь ${i}` })));
+    mockFetch(sse([delta(items.slice(0, items.length - 20), "length")]));
+    await assert.rejects(chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["items"] }), (e) => e.truncated === true);
+  }),
+);
+
+test(
+  "непочиняемый ответ без ключей: повтор запроса, а не принятие фрагмента",
+  run(async () => {
+    const items = Array.from({ length: 5 }, (_, i) => ({ index: i + 1, name: `Вещь ${i}` }));
+    const odd = JSON.stringify({ items }).replace('"Вещь 1"', '"Вещь 5" 1"');
+    const m = mockFetch(sse([delta(odd, "stop")]), jsonStream({ items }));
+    const { data } = await chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["items"] });
+    assert.equal(data.items.length, 5);
+    assert.equal(m.bodies.length, 2);
+  }),
+);

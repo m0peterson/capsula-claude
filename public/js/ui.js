@@ -1,4 +1,4 @@
-import { esc, safeHex, arr, isRecord } from "./util.js";
+import { esc, safeHex, arr, isRecord, safeImage } from "./util.js";
 
 export const CATEGORIES = {
   top: "Верх",
@@ -37,10 +37,18 @@ function rawDetails(e) {
     .join("")}</details>`;
 }
 
+// Какие экраны сейчас считают (ключ задаётся атрибутом data-task у блока статуса). Нужно, чтобы экран,
+// на который пользователь вернулся посреди расчёта, не показывал активную кнопку и не позволял запустить дубль.
+const running = new Set();
+export const isRunning = (key) => running.has(key);
+export const RUNNING_NOTE = `<div class="progress"><span class="spinner"></span><span>Расчёт ещё идёт. Результат появится здесь, когда он закончится.</span></div>`;
+
 // Запускает долгую задачу: блокирует кнопки, показывает прогресс и кнопку отмены, выводит ошибку.
 export async function runTask(statusEl, buttons, fn) {
   const ctl = new AbortController();
   const started = Date.now();
+  const key = statusEl.dataset?.task;
+  if (key) running.add(key);
   let progress = { chars: 0, thought: 0 };
   let label = "";
   buttons.forEach((b) => b && (b.disabled = true));
@@ -77,6 +85,11 @@ export async function runTask(statusEl, buttons, fn) {
   } finally {
     clearInterval(tick);
     buttons.forEach((b) => b && (b.disabled = false));
+    if (key) {
+      running.delete(key);
+      // Пользователь ушёл с вкладки и вернулся: её экран собран до конца расчёта, пусть перерисуется с итогом.
+      if (!statusEl.isConnected) window.dispatchEvent(new CustomEvent("capsula:refresh", { detail: { tab: key } }));
+    }
   }
 }
 
@@ -90,8 +103,8 @@ export const swatches = (list, size = "") =>
     .join("")}</div>`;
 
 export const thumb = (w, cls = "") =>
-  w?.image
-    ? `<img class="thumb ${cls}" src="${w.image}" alt="${esc(w.name)}" loading="lazy">`
+  safeImage(w?.image)
+    ? `<img class="thumb ${cls}" src="${esc(safeImage(w.image))}" alt="${esc(w.name)}" loading="lazy">`
     : `<div class="thumb ph ${cls}" style="background:${safeHex(w?.color_hex)}"></div>`;
 
 export const emptyState = (text, actionHtml = "") => `<div class="empty"><p>${text}</p>${actionHtml}</div>`;

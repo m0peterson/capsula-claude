@@ -2,7 +2,7 @@ import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { CAPSULE_SYSTEM, profileBrief, wardrobeBrief } from "../prompts.js";
 import { esc, arr, safeHex } from "../util.js";
-import { runTask, thumb, toast, swatches, catLabel, PRIORITY, safeHtml } from "../ui.js";
+import { runTask, thumb, toast, swatches, catLabel, PRIORITY, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
 import { normalizeCapsule } from "../normalize.js";
 
 const SEASONS = ["Круглый год", "Весна-лето", "Осень-зима", "Зима", "Лето"];
@@ -90,7 +90,7 @@ export function render(root) {
     <label class="field wide"><span>Пожелания по стилю</span>
       <textarea data-wishes rows="3" placeholder="Например: минимализм, спокойные цвета, работа в офисе и путешествия">${esc(state.wishes)}</textarea></label>
     <div class="row"><button type="button" class="primary" data-run>${state.capsule ? "Пересобрать капсулу" : "Собрать капсулу"}</button></div>
-    <div data-status></div>
+    <div data-status data-task="capsule"></div>
   </section>
   <div data-result>${state.capsule ? safeHtml(() => capsuleView(state.capsule)) : ""}</div>`;
 
@@ -108,6 +108,11 @@ export function render(root) {
   const btn = root.querySelector("[data-run]");
   const resultEl = root.querySelector("[data-result]");
   const statusEl = root.querySelector("[data-status]");
+  if (isRunning("capsule")) {
+    btn.disabled = true;
+    statusEl.innerHTML = RUNNING_NOTE;
+  }
+
   btn.addEventListener("click", async () => {
     const problem = slotProblem(settings.stylist);
     if (problem) return toast(problem, "error");
