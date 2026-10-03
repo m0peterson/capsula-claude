@@ -58,14 +58,15 @@ function capsuleView(c) {
   <section class="card"><h2>Образы капсулы <span class="count">${arr(c.looks).length}</span></h2>
     ${arr(c.looks)
       .map((l) => {
+        // Покупка или своя вещь определяется по принадлежности к списку покупок, а не по наличию фото.
         const parts = arr(l.refs)
-          .map((r) => refOf(r, wardrobe, buy))
+          .map((r) => (buy.has(r) ? { item: buy.get(r), isBuy: true } : wardrobe.has(r) ? { item: wardrobe.get(r), isBuy: false } : null))
           .filter(Boolean);
         return `<article class="look"><h3>${esc(l.name)}</h3><p class="meta">${esc(l.occasion)}</p>
         <div class="look-items">${parts
           .map(
-            (p) =>
-              `<figure>${p.image ? thumb(p) : buyThumb(p)}<figcaption>${esc(p.name)}${p.image ? "" : " (докупить)"}</figcaption></figure>`,
+            ({ item, isBuy }) =>
+              `<figure>${isBuy ? buyThumb(item) : thumb(item)}<figcaption>${esc(item.name)}${isBuy ? " (докупить)" : ""}</figcaption></figure>`,
           )
           .join("")}</div><p>${esc(l.description)}</p></article>`;
       })

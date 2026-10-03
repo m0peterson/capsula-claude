@@ -1,7 +1,7 @@
 import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { WARDROBE_SYSTEM } from "../prompts.js";
-import { esc, arr, uid, fileToDataUrl } from "../util.js";
+import { esc, arr, uid, fileToDataUrl, safeImage } from "../util.js";
 import { recognizedItems } from "../normalize.js";
 import { runTask, thumb, toast, readImages, CATEGORIES, emptyState, isRunning, RUNNING_NOTE } from "../ui.js";
 
@@ -92,7 +92,12 @@ export function render(root) {
     const problem = slotProblem(settings.vision);
     if (problem) return toast(problem, "error");
     const done = await runTask(statusEl, [recBtn], async ({ signal, onProgress, setLabel, notice }) => {
-      const queue = items.filter((w) => !w.recognized);
+      const pending = items.filter((w) => !w.recognized);
+      // Вещь без годной картинки (например, после импорта копии) распознать нельзя: пустой image_url провайдер отклонит.
+      const queue = pending.filter((w) => safeImage(w.image));
+      if (queue.length < pending.length)
+        notice(`У вещей без фото распознавание пропущено: ${pending.length - queue.length}. Заполните их вручную.`);
+      if (!queue.length) throw new Error("Нет вещей с фото для распознавания.");
       let recognized = 0;
       for (let i = 0; i < queue.length; i += BATCH) {
         const batch = queue.slice(i, i + BATCH);

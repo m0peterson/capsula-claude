@@ -15,6 +15,7 @@ export const defaultState = () => ({
   looks: [],
   capsule: null,
   search: {},
+  searchLast: "",
   capsuleOptions: null,
 });
 
@@ -73,12 +74,17 @@ export function migrate(st) {
       return null;
     }
   };
-  st.wardrobe = (Array.isArray(st.wardrobe) ? st.wardrobe : [])
-    .filter(isRecord)
-    .map((w) => ({ ...w, id: String(w.id ?? ""), image: safeImage(w.image) }));
+  let droppedImages = 0;
+  st.wardrobe = (Array.isArray(st.wardrobe) ? st.wardrobe : []).filter(isRecord).map((w) => {
+    const image = safeImage(w.image);
+    if (w.image && !image) droppedImages++;
+    return { ...w, id: String(w.id ?? ""), image };
+  });
   const ids = new Set(st.wardrobe.map((w) => w.id));
   st.profile = isRecord(st.profile) ? st.profile : defaultState().profile;
-  st.profile.photos = Array.isArray(st.profile.photos) ? st.profile.photos.filter((p) => safeImage(p)) : [];
+  const photos = Array.isArray(st.profile.photos) ? st.profile.photos : [];
+  st.profile.photos = photos.filter((p) => safeImage(p));
+  droppedImages += photos.length - st.profile.photos.length;
   st.profile.inputs = isRecord(st.profile.inputs) ? st.profile.inputs : {};
   if (st.profile.analysis) st.profile.analysis = attempt("анализ", () => normalizeAnalysis(st.profile.analysis));
   st.looks = attempt("образы", () => normalizeLooks({ looks: st.looks }, ids)) || [];
@@ -88,6 +94,7 @@ export function migrate(st) {
     st.search[k] = isRecord(v) ? { ...v, results: normalizeSearch(v.results) } : undefined;
     if (st.search[k] === undefined) delete st.search[k];
   }
+  return { droppedImages };
 }
 
 export async function init() {
@@ -164,7 +171,8 @@ export async function importData(text) {
   if (!isRecord(parsed?.state)) throw new Error("Это не файл резервной копии Capsula");
   // Копия может быть из старой версии или составлена вручную: приводим к нынешней форме так же, как при загрузке.
   const next = { ...defaultState(), ...parsed.state };
-  migrate(next);
+  const { droppedImages } = migrate(next);
   Object.assign(state, next);
   await idbSet("state", JSON.parse(JSON.stringify(state)));
+  return { droppedImages };
 }

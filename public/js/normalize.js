@@ -11,7 +11,13 @@ export function text(v) {
   if (typeof v === "string") return v.trim();
   if (typeof v === "number" && Number.isFinite(v)) return String(v);
   // Массив строк вместо строки (например, «ткани» списком): не стираем, склеиваем.
-  if (Array.isArray(v)) return v.map(text).filter(Boolean).join("; ");
+  if (Array.isArray(v)) {
+    // «;» между предложениями даёт «.;», поэтому после знака конца предложения склеиваем пробелом.
+    return v
+      .map(text)
+      .filter(Boolean)
+      .reduce((acc, x) => (acc ? acc + (/[.!?…]$/.test(acc) ? " " : "; ") + x : x), "");
+  }
   return "";
 }
 
@@ -110,9 +116,8 @@ export function normalizeAnalysis(data) {
     result.body.figure_type ||
     result.body.proportions ||
     result.styles.length ||
-    result.silhouettes.length ||
-    result.summary;
-  if (!useful) throw incomplete("в анализе нет ни цветотипа, ни фигуры, ни стилей");
+    result.silhouettes.length;
+  if (!useful) throw incomplete("в анализе нет ни цветотипа, ни фигуры, ни стилей, ни силуэтов");
   return result;
 }
 

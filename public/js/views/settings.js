@@ -104,8 +104,8 @@ export function render(root, ctx) {
     const file = e.target.files[0];
     if (!file) return;
     try {
-      await importData(await file.text());
-      toast("Копия загружена");
+      const { droppedImages } = await importData(await file.text());
+      toast(droppedImages ? `Копия загружена. Картинок отброшено как небезопасные или повреждённые: ${droppedImages}` : "Копия загружена");
     } catch (err) {
       toast(`Не удалось загрузить: ${err.message}`, "error");
     }

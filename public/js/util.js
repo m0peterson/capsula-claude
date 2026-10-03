@@ -12,7 +12,7 @@ export const safeHex = (h) => {
 
 // Картинки приложения это только data URL растровых форматов. Всё остальное (в том числе из импортированной копии)
 // нельзя подставлять в src: через кавычку в значении можно дописать атрибут и выполнить свой скрипт.
-export const safeImage = (u) => (typeof u === "string" && /^data:image\/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(u) ? u : "");
+export const safeImage = (u) => (typeof u === "string" && /^data:image\/(?:jpe?g|png|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(u) ? u : "");
 
 export const safeUrl = (u) => {
   try {
@@ -95,6 +95,9 @@ function fencedBlocks(t) {
 }
 
 // Убирает рассуждения, попавшие в content. Незакрытый <think> значит, что до ответа модель не дошла.
+// Возвращает text без парных блоков и tail: то, что идёт после одиночного закрывающего тега (или null).
+// Открывающий тег у некоторых провайдеров срезан, и тогда всё до закрывающего это рассуждения. В них бывают
+// черновики JSON, которые крупнее итога, поэтому tail разбирается первым.
 function stripThink(t) {
   const open = /<(think|thinking|reasoning)>/gi;
   let out = "";
@@ -105,35 +108,18 @@ function stripThink(t) {
     const closeRe = new RegExp(`</${m[1]}>`, "gi");
     closeRe.lastIndex = m.index + m[0].length;
     const c = closeRe.exec(t);
-    if (!c) return out;
+    if (!c) return { text: out, tail: null };
     pos = c.index + c[0].length;
     open.lastIndex = pos;
   }
   out += t.slice(pos);
-  // Открывающий тег у некоторых провайдеров срезан: всё до одиночного закрывающего это рассуждения.
-  // Но если до тега уже есть что-то похожее на JSON ("ключ":), тег стоит в самом ответе, и резать нельзя.
   const stray = /<\/(?:think|thinking|reasoning)>/i.exec(out);
-  if (!stray || /"[^"\n]{1,60}"\s*:/.test(out.slice(0, stray.index))) return out;
-  return out.slice(stray.index + stray[0].length);
+  return { text: out, tail: stray ? out.slice(stray.index + stray[0].length) : null };
 }
 
-// Разбирает JSON из ответа модели и сообщает, пришлось ли его чинить.
-// Снимает <think>-блоки и ```-обёртки, игнорирует текст до и после, чинит типичные ошибки моделей:
-// неэкранированные кавычки внутри строк, висячие запятые, комментарии, одинарные кавычки, оборванный конец.
-//
-// Кандидатов собираем со всех начал и источников и выбираем лучшего. Сноска «[1]» или «{}» в прозе тоже
-// валидный JSON, поэтому «первый разобравшийся» не годится. Лучший: больше всего ожидаемых ключей корня
-// (opts.expect), потом не вложенный в незакрытую скобку, потом объект, а не массив, потом больший размер,
-// потом нечинённый. Поле nested в результате говорит, что ответ найден внутри незакрытой скобки.
-export function parseModelJson(text, { expect = [] } = {}) {
-  const raw = String(text ?? "");
-  const t = stripThink(raw);
-  const sources = [...fencedBlocks(t), t];
-
-  let firstError = null;
-  const note = (e) => (firstError ??= e);
+// Лучший кандидат среди JSON-фрагментов набора источников или null. См. parseModelJson.
+function pickBest(sources, expect, note) {
   const candidates = [];
-
   for (const src of sources) {
     let repairs = 0;
     for (const { start, nested } of startsOf(src)) {
@@ -176,9 +162,8 @@ export function parseModelJson(text, { expect = [] } = {}) {
   const scored = candidates
     .map((c) => {
       let value = c.value;
-      const rec = isRecord(value);
       // Ответ в обёртке {"analysis": {...}}: достаём вложенный объект, если в нём ожидаемые ключи.
-      if (rec && expect.length && !expect.some((k) => k in value)) {
+      if (isRecord(value) && expect.length && !expect.some((k) => k in value)) {
         const keys = Object.keys(value);
         if (keys.length === 1 && isRecord(value[keys[0]]) && expect.some((k) => k in value[keys[0]])) value = value[keys[0]];
       }
@@ -203,11 +188,35 @@ export function parseModelJson(text, { expect = [] } = {}) {
         b.size - a.size ||
         Number(a.repaired) - Number(b.repaired),
     );
-
-  if (scored.length) return { value: scored[0].value, repaired: scored[0].repaired, nested: scored[0].nested };
+  if (scored.length) return scored[0];
   // Единственное, что нашлось: честный пустой объект.
   const empty = candidates.find((c) => isRecord(c.value) && Object.keys(c.value).length === 0 && !c.repaired && !c.nested);
-  if (empty) return { value: empty.value, repaired: false };
+  return empty ? { value: empty.value, repaired: false, nested: false, hits: 0 } : null;
+}
+
+// Разбирает JSON из ответа модели и сообщает, пришлось ли его чинить.
+// Снимает <think>-блоки и ```-обёртки, игнорирует текст до и после, чинит типичные ошибки моделей:
+// неэкранированные кавычки внутри строк, висячие запятые, комментарии, одинарные кавычки, оборванный конец.
+//
+// Кандидатов собираем со всех начал и источников и выбираем лучшего. Сноска «[1]» или «{}» в прозе тоже
+// валидный JSON, поэтому «первый разобравшийся» не годится. Лучший: больше всего ожидаемых ключей корня
+// (opts.expect), потом не вложенный в незакрытую скобку, потом объект, а не массив, потом больший размер,
+// потом нечинённый. Поле nested в результате говорит, что ответ найден внутри незакрытой скобки.
+export function parseModelJson(text, { expect = [] } = {}) {
+  const raw = String(text ?? "");
+  const { text: t, tail } = stripThink(raw);
+
+  let firstError = null;
+  const note = (e) => (firstError ??= e);
+  const sourcesOf = (str) => [...fencedBlocks(str), str];
+
+  // После одиночного </think> лежит итоговый ответ. Если в нём есть то, что мы ждём, черновики из рассуждений не нужны.
+  if (tail !== null) {
+    const best = pickBest(sourcesOf(tail), expect, note);
+    if (best && (!expect.length || best.hits > 0)) return { value: best.value, repaired: best.repaired, nested: best.nested };
+  }
+  const best = pickBest(sourcesOf(t), expect, note);
+  if (best) return { value: best.value, repaired: best.repaired, nested: best.nested };
   throw jsonError(raw, firstError);
 }
 

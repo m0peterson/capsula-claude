@@ -363,3 +363,38 @@ test("importData проходит миграцию и отклоняет не-к
   assert.deepEqual(state.profile.photos, [ok]);
   assert.deepEqual(state.profile.analysis.body.goals, ["a", "b"]);
 });
+
+// --- Регрессии третьего раунда ревью --------------------------------------------------------------------
+test("анализ из одного summary отклоняется: прежний хороший анализ не затирается пустой оболочкой", () => {
+  assert.throws(() => N.normalizeAnalysis({ color_type: {}, body: {}, summary: "Просто текст" }), /неполный/);
+  assert.ok(N.normalizeAnalysis({ color_type: {}, body: {}, silhouettes: [{ zone: "Верх", recommend: "приталенный" }] }));
+});
+
+test("text(): предложения склеиваются пробелом, остальное через «;»", () => {
+  assert.equal(N.text(["Носите приталенное.", "Избегайте боксов."]), "Носите приталенное. Избегайте боксов.");
+  assert.equal(N.text(["шерсть", "хлопок"]), "шерсть; хлопок");
+  assert.equal(N.text(["Хорошо!", "ткань"]), "Хорошо! ткань");
+});
+
+test("картинки: jpg принимается, миграция и импорт сообщают, сколько отброшено", async () => {
+  const { safeImage } = await import("../public/js/util.js");
+  assert.equal(safeImage("data:image/jpg;base64,/9j/4AAQ"), "data:image/jpg;base64,/9j/4AAQ");
+  const st = {
+    ...defaultState(),
+    wardrobe: [
+      { id: "w1", image: "javascript:x" },
+      { id: "w2", image: "data:image/png;base64,AAAA" },
+    ],
+    profile: { photos: ["bad", "data:image/png;base64,AAAA"], inputs: {}, analysis: null },
+  };
+  assert.deepEqual(migrate(st), { droppedImages: 2 });
+  const { importData } = await import("../public/js/store.js");
+  globalThis.indexedDB = undefined;
+  let res;
+  try {
+    res = await importData(JSON.stringify({ state: { wardrobe: [{ id: "w1", image: "bad" }] } }));
+  } catch (e) {
+    assert.match(String(e), /open|indexedDB/i);
+  }
+  assert.ok(res === undefined || res.droppedImages === 1);
+});

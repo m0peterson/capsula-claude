@@ -210,3 +210,22 @@ test("одиночный </think> внутри самого ответа не с
   // а настоящий одиночный закрывающий тег после рассуждений по-прежнему срезается
   assert.deepEqual(parseModelJson(`рассуждение [1] {x}</think>\n${J}`, EXPECT).value, JV);
 });
+
+// --- Регрессии третьего раунда ревью --------------------------------------------------------------------
+test("черновик JSON в рассуждениях до одиночного </think> не побеждает итоговый ответ", () => {
+  const draft = '{"items":[{"index":1,"name":"Тренч"},{"index":2,"name":"Юбка"},{"index":3,"name":"Сумка"}]}';
+  const final = '{"items":[{"index":1,"name":"Тренч"},{"index":2,"name":"Юбка"}]}';
+  const text = `Фото 1 тренч, фото 2 юбка, на 3 вроде сумка. Черновик: ${draft}\nНа третьем фото сумки нет, это плед. Уберу третий элемент.\n</think>\n${final}`;
+  const r = parseModelJson(text, { expect: ["items"] });
+  assert.deepEqual(
+    r.value.items.map((x) => x.name),
+    ["Тренч", "Юбка"],
+  );
+});
+
+test("если после одиночного </think> ответа нет, берётся текст целиком", () => {
+  const a = JSON.stringify({ color_type: { season: "осень", reasoning: "теги </think> в тексте" }, body: { type: "груша" }, summary: "x" });
+  assert.equal(parseModelJson(a, EXPECT).value.summary, "x");
+  const onlyDraft = `рассуждение: ${J}\n</think>\nГотово.`;
+  assert.deepEqual(parseModelJson(onlyDraft, EXPECT).value, JV);
+});

@@ -468,3 +468,89 @@ test(
     assert.equal(m.bodies.length, 2);
   }),
 );
+
+// --- Регрессии третьего раунда ревью --------------------------------------------------------------------
+const erroringStream = (chunks, { cancelled, error = new TypeError("terminated") } = {}) => {
+  const enc = new TextEncoder();
+  let i = 0;
+  return new Response(
+    new ReadableStream({
+      pull(c) {
+        if (i < chunks.length)
+          c.enqueue(enc.encode(typeof chunks[i] === "string" ? chunks[i++] : `data: ${JSON.stringify(chunks[i++])}\n\n`));
+        else if (error) c.error(error);
+      },
+      cancel() {
+        if (cancelled) cancelled.done = true;
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+};
+
+test(
+  "после [DONE] ошибка чтения не делает ответ оборванным даже если JSON пришлось чинить",
+  run(async () => {
+    const broken = '{"a":"он сказал "привет" мне"}'; // требует ремонта: при truncated=true это была бы ошибка обрыва
+    mockFetch(erroringStream([delta(broken), "data: [DONE]\n\n"]));
+    assert.equal((await ask()).data.a, 'он сказал "привет" мне');
+  }),
+);
+
+test(
+  "исключение при обработке чанка (не ошибка сети) пробрасывается как есть и закрывает поток",
+  run(async () => {
+    const cancelled = { done: false };
+    mockFetch(erroringStream([delta('{"a"'), { choices: [{ delta: { content: "x", annotations: 5 } }] }], { cancelled, error: null }));
+    await assert.rejects(ask(), (e) => e instanceof TypeError && !e.truncated);
+    await new Promise((r) => setTimeout(r, 0)); // cancel() запускается без ожидания
+    assert.equal(cancelled.done, true, "reader.cancel() вызван");
+  }),
+);
+
+test(
+  "решение про параметр забывается через 30 минут",
+  run(async () => {
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      const m = mockFetch(
+        errorResponse(400, "Unsupported parameter: response_format"),
+        jsonStream({ a: 1 }),
+        jsonStream({ a: 1 }),
+        jsonStream({ a: 1 }),
+      );
+      await ask();
+      await ask();
+      assert.equal(m.bodies[2].response_format, undefined, "в пределах 30 минут параметр не шлётся");
+      now += 31 * 60 * 1000;
+      await ask();
+      assert.ok(m.bodies[3].response_format, "через 31 минуту пробуем снова");
+    } finally {
+      Date.now = realNow;
+    }
+  }),
+);
+
+test(
+  "ответ из вложенного фрагмента при finish=length даёт ошибку обрыва",
+  run(async () => {
+    const text = 'Анализ [фото:\n{"color_type":{"season":"осень"},"body":{"type":"груша"}}';
+    mockFetch(sse([delta(text, "length")]));
+    await assert.rejects(
+      chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["color_type", "body"] }),
+      (e) => e.truncated === true,
+    );
+  }),
+);
+
+test(
+  "черновик в рассуждениях до </think> не просачивается через chatJson",
+  run(async () => {
+    const draft = '{"items":[{"index":1,"name":"A"},{"index":2,"name":"B"},{"index":3,"name":"Сумка"}]}';
+    mockFetch(sse([delta(`черновик ${draft} сумки нет\n</think>\n{"items":[{"index":1,"name":"A"},{"index":2,"name":"B"}]}`, "stop")]));
+    const { data } = await chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["items"] });
+    assert.equal(data.items.length, 2);
+  }),
+);

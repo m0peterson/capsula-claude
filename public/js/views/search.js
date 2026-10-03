@@ -29,7 +29,8 @@ export function render(root, ctx) {
   const buy = arr(state.capsule?.buy);
   const wanted = (ctx.param && buy.find((b) => b.id === ctx.param)) || null;
   const selected = wanted || buy[0] || null;
-  const queryDefault = selected?.search_query || "";
+  // Если пришли из капсулы по ссылке, берём запрос вещи. Иначе показываем тот, по которому искали в прошлый раз.
+  const queryDefault = wanted?.search_query || state.searchLast || selected?.search_query || "";
 
   root.innerHTML = `
   <section class="card">
@@ -122,6 +123,7 @@ export function render(root, ctx) {
       const verified = confirmed.length > 0;
       if (verified) results = confirmed;
       state.search[text] = { results, verified, at: Date.now() };
+      state.searchLast = text;
       save();
     });
     if (ok && resultsEl.isConnected) paintResults();

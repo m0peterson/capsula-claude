@@ -30,7 +30,9 @@ function keyBanner() {
   banner.innerHTML = missing.length ? `Для работы нужен API-ключ (${missing.join(", ")}). <a href="#settings">Открыть настройки</a>` : "";
 }
 
-function route() {
+const currentTab = () => location.hash.replace(/^#/, "").split("/")[0] || "profile";
+
+function route({ keepScroll = false } = {}) {
   const [id, param] = location.hash.replace(/^#/, "").split("/");
   const tab = TABS.find((t) => t.id === id) || TABS[0];
   ctx.param = param || null;
@@ -38,14 +40,37 @@ function route() {
   keyBanner();
   main.innerHTML = "";
   tab.view.render(main, ctx);
-  window.scrollTo(0, 0);
+  if (!keepScroll) window.scrollTo(0, 0);
 }
 
 await init();
 ctx.serverConfig = await fetchServerConfig();
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => {
+  pendingRefresh = null;
+  route();
+});
 // Задача закончилась, пока пользователь был на другой вкладке и вернулся: перерисовываем её с готовым результатом.
+// Если в этот момент пользователь печатает в поле формы, перерисовка отнимет фокус и съест набранное:
+// откладываем её до ухода из поля. Прокрутку сохраняем.
+let pendingRefresh = null;
+const isEditing = () => {
+  const a = document.activeElement;
+  return Boolean(a && main.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+};
+const refreshNow = () => {
+  pendingRefresh = null;
+  const y = window.scrollY;
+  route({ keepScroll: true });
+  window.scrollTo(0, y);
+};
 window.addEventListener("capsula:refresh", (e) => {
-  if ((location.hash.replace(/^#/, "").split("/")[0] || "profile") === e.detail.tab) route();
+  if (currentTab() !== e.detail.tab) return;
+  if (isEditing()) pendingRefresh = e.detail.tab;
+  else refreshNow();
+});
+document.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (pendingRefresh && currentTab() === pendingRefresh && !isEditing()) refreshNow();
+  }, 50);
 });
 route();

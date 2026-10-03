@@ -21,10 +21,21 @@ const types = {
 
 const server = http.createServer(async (req, res) => {
   try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    // Путь вида «//localhost/api/llm» URL разбирает как адрес с другим хостом, поэтому принимаем только «/путь».
+    if (!req.url.startsWith("/") || req.url.startsWith("//")) {
+      res.writeHead(400).end("Bad request");
+      return;
+    }
+    const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/api/llm") {
-      // Защита от DNS rebinding: на этот API ходит только страница с localhost.
-      if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+      // Защита от DNS rebinding: на этот API ходит только страница с localhost. Хост берём из заголовка Host.
+      let hostname = "";
+      try {
+        hostname = new URL(`http://${req.headers.host}`).hostname;
+      } catch {
+        /* битый Host */
+      }
+      if (!["localhost", "127.0.0.1", "[::1]"].includes(hostname)) {
         res.writeHead(403).end("Forbidden host");
         return;
       }
