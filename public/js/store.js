@@ -24,8 +24,8 @@ export const defaultSettings = () => ({
   },
   // Слот vision получает фото (анализ клиента, распознавание вещей).
   // Слот stylist работает с текстом (образы, капсула, поиск).
-  vision: { provider: "openrouter", model: "meta/muse-spark-1.3-contributor", effort: "xhigh" },
-  stylist: { provider: "openrouter", model: "openai/gpt-6-luna", effort: "xhigh" },
+  vision: { provider: "openrouter", model: "meta/muse-spark-1.3-contributor", effort: "xhigh", maxTokens: 0 },
+  stylist: { provider: "openrouter", model: "openai/gpt-6-luna", effort: "xhigh", maxTokens: 0 },
 });
 
 export const state = defaultState();

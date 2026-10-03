@@ -27,6 +27,16 @@ export function toast(message, kind = "info") {
   }, 3500);
 }
 
+// Сырой ответ модели для отладки: начало и конец, чтобы видеть, обрезан ли он и чем испорчен.
+function rawDetails(e) {
+  const part = (t) => (t.length > 2400 ? `${t.slice(0, 1600)}\n…[пропущено ${t.length - 2400} зн.]…\n${t.slice(-800)}` : t);
+  const blocks = [e.raw && ["Ответ модели", e.raw], e.raw2 && ["Ответ на повторный запрос", e.raw2]].filter(Boolean);
+  if (!blocks.length) return "";
+  return `<details class="raw"><summary>Показать ответ модели (${blocks.map(([, t]) => t.length).join(" и ")} зн.)</summary>${blocks
+    .map(([title, t]) => `<p class="meta">${title}</p><pre>${esc(part(t))}</pre>`)
+    .join("")}</details>`;
+}
+
 // Запускает долгую задачу: блокирует кнопки, показывает прогресс и кнопку отмены, выводит ошибку.
 export async function runTask(statusEl, buttons, fn) {
   const ctl = new AbortController();
@@ -59,7 +69,9 @@ export async function runTask(statusEl, buttons, fn) {
     return result ?? true;
   } catch (e) {
     statusEl.innerHTML =
-      e.name === "AbortError" ? `<div class="note">Отменено.</div>` : `<div class="error"><strong>Ошибка.</strong> ${esc(e.message)}</div>`;
+      e.name === "AbortError"
+        ? `<div class="note">Отменено.</div>`
+        : `<div class="error"><strong>Ошибка.</strong> ${esc(e.message)}${rawDetails(e)}</div>`;
     return null;
   } finally {
     clearInterval(tick);

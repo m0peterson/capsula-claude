@@ -1,3 +1,5 @@
+import { jsonrepair } from "./vendor/jsonrepair/index.js";
+
 export const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
@@ -16,19 +18,123 @@ export const safeUrl = (u) => {
 
 export const arr = (v) => (Array.isArray(v) ? v : []);
 
-// Достаёт JSON из ответа модели: убирает ```-обёртку и текст вокруг.
-export function extractJson(text) {
-  let t = String(text || "").trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) t = fence[1].trim();
-  const start = t.search(/[{[]/);
-  if (start < 0) throw new Error("В ответе модели нет JSON");
-  const open = t[start];
-  const close = open === "{" ? "}" : "]";
-  const end = t.lastIndexOf(close);
-  if (end <= start) throw new Error("JSON в ответе модели оборван");
-  return JSON.parse(t.slice(start, end + 1));
+// Конец первого сбалансированного значения от позиции start. Скобки внутри строк не считаются.
+function balancedEnd(t, start) {
+  let depth = 0;
+  let inStr = false;
+  let escaped = false;
+  for (let i = start; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{" || c === "[") depth++;
+    else if ((c === "}" || c === "]") && --depth === 0) return i;
+  }
+  return -1;
 }
+
+const isObj = (v) => v !== null && typeof v === "object";
+// После ремонта массив принимаем, только если в нём объекты: «[фото 1]» из прозы это не ответ.
+const plausible = (v) => isObj(v) && (!Array.isArray(v) || v.some(isObj));
+
+function jsonError(raw, cause) {
+  const reason = cause ? ` (${cause.message})` : "";
+  const err = new Error(`Модель вернула ответ, который не удалось разобрать как JSON${reason}.`);
+  err.raw = raw;
+  return err;
+}
+
+// Верхнеуровневые начала значений в тексте. Вложенные пропускаем, иначе оборванный ответ
+// превращается во вложенный объект вместо целого.
+function topStarts(src) {
+  const out = [];
+  let from = 0;
+  while (out.length < 6) {
+    const found = src.slice(from).search(/[{[]/);
+    if (found < 0) break;
+    const start = from + found;
+    out.push(start);
+    const end = balancedEnd(src, start);
+    if (end < 0) break;
+    from = end + 1;
+  }
+  return out;
+}
+
+// Разбирает JSON из ответа модели и сообщает, пришлось ли его чинить.
+// Снимает <think>-блоки и ```-обёртки, игнорирует текст до и после, чинит типичные ошибки моделей:
+// неэкранированные кавычки внутри строк, висячие запятые, комментарии, одинарные кавычки, оборванный конец.
+export function parseModelJson(text) {
+  const raw = String(text ?? "");
+  let t = raw.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "");
+  const stray = t.search(/<\/(?:think|thinking|reasoning)>/i); // открывающий тег у некоторых провайдеров срезан
+  if (stray >= 0) t = t.slice(t.indexOf(">", stray) + 1);
+
+  const sources = [...t.matchAll(/```[\w-]*\s*([\s\S]*?)```/g)].map((m) => m[1]);
+  sources.push(t);
+
+  // Варианты среза для одного начала: хвост целиком, до последней закрывающей скобки, сбалансированный кусок.
+  const slices = (src, start) => {
+    const last = src.lastIndexOf(src[start] === "{" ? "}" : "]");
+    const end = balancedEnd(src, start);
+    return {
+      balanced: end >= 0 ? src.slice(start, end + 1) : null,
+      tail: src.slice(start),
+      toLast: last > start ? src.slice(start, last + 1) : null,
+    };
+  };
+
+  let firstError = null;
+  const note = (e) => (firstError ??= e);
+
+  // Проход 1: обычный JSON.parse.
+  for (const src of sources) {
+    for (const start of topStarts(src)) {
+      const { balanced, toLast } = slices(src, start);
+      for (const slice of new Set([balanced, toLast])) {
+        if (slice === null) continue;
+        try {
+          const v = JSON.parse(slice);
+          if (isObj(v)) return { value: v, repaired: false };
+        } catch (e) {
+          note(e);
+        }
+      }
+    }
+  }
+
+  // Проход 2: ремонт. Из всех начал берём самый полный результат: так мусорная скобка в прозе
+  // вроде «[фото 1]» не побеждает настоящий ответ.
+  for (const src of sources) {
+    let best = null;
+    let bestLen = 0;
+    for (const start of topStarts(src)) {
+      const { tail, toLast, balanced } = slices(src, start);
+      for (const slice of new Set([tail, toLast, balanced])) {
+        if (slice === null) continue;
+        try {
+          const v = JSON.parse(jsonrepair(slice));
+          const len = plausible(v) ? JSON.stringify(v).length : 0;
+          if (len > 2 && len > bestLen) {
+            best = v;
+            bestLen = len;
+          }
+          if (len > 2) break;
+        } catch (e) {
+          note(e);
+        }
+      }
+    }
+    if (best) return { value: best, repaired: true };
+  }
+
+  throw jsonError(raw, firstError);
+}
+
+export const extractJson = (text) => parseModelJson(text).value;
 
 // Сжимает фото до maxSide и возвращает JPEG data URL. Учитывает EXIF-поворот.
 export async function fileToDataUrl(file, maxSide = 1024, quality = 0.85) {

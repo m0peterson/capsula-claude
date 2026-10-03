@@ -316,6 +316,9 @@ button.link {
   margin-top: 12px;
   overflow-wrap: anywhere;
 }
+.error details.raw { margin-top: 8px; font-size: .85rem; }
+.error details.raw summary { cursor: pointer; }
+.error details.raw pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; background: var(--bg); padding: 8px; border-radius: 8px; margin: 4px 0 8px; }
 .note {
   margin-top: 12px;
   color: var(--muted);

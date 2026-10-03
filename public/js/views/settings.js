@@ -20,6 +20,8 @@ function slotHtml(name, title, hint) {
         <datalist id="models-${name}">${(MODEL_SUGGESTIONS[s.provider] || []).map((m) => `<option value="${esc(m)}">`).join("")}</datalist></label>
       <label class="field"><span>Режим рассуждения (effort)</span>
         <select data-slot="${name}" data-k="effort">${EFFORTS.map((e) => `<option value="${e}" ${e === s.effort ? "selected" : ""}>${e || "не передавать"}</option>`).join("")}</select></label>
+      <label class="field"><span>Лимит ответа, токенов (0 = не передавать)</span>
+        <input type="number" min="0" step="1000" data-slot="${name}" data-k="maxTokens" value="${esc(s.maxTokens ?? "")}" placeholder="0 = не передавать"></label>
     </div>
   </section>`;
 }
@@ -78,7 +80,7 @@ export function render(root, ctx) {
   });
   root.querySelectorAll("[data-slot]").forEach((el) =>
     el.addEventListener("change", () => {
-      settings[el.dataset.slot][el.dataset.k] = el.value.trim();
+      settings[el.dataset.slot][el.dataset.k] = el.type === "number" ? Number(el.value) || 0 : el.value.trim();
       saveSettings();
       if (el.dataset.k === "provider") render(root, ctx); // обновить подсказки моделей
     }),
