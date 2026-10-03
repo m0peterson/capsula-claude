@@ -2,12 +2,14 @@ import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { SEARCH_SYSTEM } from "../prompts.js";
 import { SHOPS } from "../shops.js";
-import { esc, arr, safeUrl } from "../util.js";
-import { runTask, toast, catLabel, emptyState } from "../ui.js";
+import { esc, arr, safeUrl, isRecord } from "../util.js";
+import { normalizeSearch } from "../normalize.js";
+import { runTask, toast, catLabel, emptyState, safeHtml } from "../ui.js";
 
 function resultsHtml(entry) {
   if (!entry) return "";
   const rows = arr(entry.results)
+    .filter(isRecord)
     .map((r) => ({ ...r, href: safeUrl(r.url) }))
     .filter((r) => r.href);
   if (!rows.length) return `<p class="muted">Модель не нашла подходящих ссылок. Попробуйте магазины выше.</p>`;
@@ -58,8 +60,9 @@ export function render(root, ctx) {
       : `<span class="muted">Введите запрос.</span>`;
   };
   const current = () => buy.find((b) => b.id === root.querySelector("[data-pick]")?.value) || selected;
+  const resultsEl = root.querySelector("[data-results]");
   const paintResults = () => {
-    root.querySelector("[data-results]").innerHTML = resultsHtml(state.search[q.value.trim()]);
+    resultsEl.innerHTML = safeHtml(() => resultsHtml(state.search[q.value.trim()]));
   };
   paintShops();
   paintResults();
@@ -80,9 +83,10 @@ export function render(root, ctx) {
     const problem = slotProblem(settings.stylist);
     if (problem) return toast(problem, "error");
     const item = current();
-    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel }) => {
+    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel, notice }) => {
       setLabel("Ищу в интернете");
       const palette = arr(state.profile.analysis?.color_type?.best_colors)
+        .filter(isRecord)
         .map((c) => c.name)
         .join(", ");
       const { data, annotations } = await chatJson({
@@ -90,10 +94,12 @@ export function render(root, ctx) {
         system: SEARCH_SYSTEM,
         user: `Запрос: ${text}\n${item?.description ? `Описание вещи: ${item.description}\n` : ""}${item?.color ? `Цвет: ${item.color}\n` : ""}Цвета клиента: ${palette || "не определены"}\nБюджет: ${item?.price_range || state.profile.inputs.budget || "не указан"}\nРегион и магазины: ${state.profile.inputs.city || "Россия"}, нужны магазины с доставкой туда.`,
         extra: { plugins: [{ id: "web", max_results: 10 }] },
+        expect: ["results"],
         signal,
         onProgress,
+        onNotice: notice,
       });
-      let results = arr(data.results ?? data);
+      let results = normalizeSearch(data);
       const key = (u) => {
         const href = safeUrl(u);
         if (!href) return "";
@@ -102,6 +108,7 @@ export function render(root, ctx) {
       };
       const cited = new Set(
         arr(annotations)
+          .filter(isRecord)
           .map((a) => key(a.url_citation?.url || a.url))
           .filter(Boolean),
       );
@@ -113,6 +120,6 @@ export function render(root, ctx) {
       state.search[text] = { results, verified, at: Date.now() };
       save();
     });
-    if (ok) paintResults();
+    if (ok && resultsEl.isConnected) paintResults();
   });
 }

@@ -5,7 +5,10 @@ export const esc = (s) =>
 
 export const uid = (p = "w") => p + Math.random().toString(36).slice(2, 9);
 
-export const safeHex = (h) => (/^#[0-9a-f]{3,8}$/i.test(String(h || "").trim()) ? h.trim() : "#cccccc");
+export const safeHex = (h) => {
+  const s = String(h ?? "").trim();
+  return /^#[0-9a-f]{3,8}$/i.test(s) ? s : "#cccccc";
+};
 
 export const safeUrl = (u) => {
   try {
@@ -17,6 +20,9 @@ export const safeUrl = (u) => {
 };
 
 export const arr = (v) => (Array.isArray(v) ? v : []);
+
+// Обычный объект (не массив, не null).
+export const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // Конец первого сбалансированного значения от позиции start. Скобки внутри строк не считаются.
 function balancedEnd(t, start) {
@@ -36,10 +42,6 @@ function balancedEnd(t, start) {
   return -1;
 }
 
-const isObj = (v) => v !== null && typeof v === "object";
-// После ремонта массив принимаем, только если в нём объекты: «[фото 1]» из прозы это не ответ.
-const plausible = (v) => isObj(v) && (!Array.isArray(v) || v.some(isObj));
-
 function jsonError(raw, cause) {
   const reason = cause ? ` (${cause.message})` : "";
   const err = new Error(`Модель вернула ответ, который не удалось разобрать как JSON${reason}.`);
@@ -47,94 +49,148 @@ function jsonError(raw, cause) {
   return err;
 }
 
-// Верхнеуровневые начала значений в тексте. Вложенные пропускаем, иначе оборванный ответ
-// превращается во вложенный объект вместо целого.
-function topStarts(src) {
+const MAX_STARTS = 64;
+const MAX_REPAIRS = 4;
+
+// Начала значений в тексте. Закрытый кусок пропускаем целиком: вложенное не интересно, иначе оборванный
+// ответ превращается во вложенный объект. Незакрытую скобку концом не считаем: после неё может идти ответ.
+function startsOf(src) {
   const out = [];
+  const re = /[{[]/g;
   let from = 0;
-  while (out.length < 6) {
-    const found = src.slice(from).search(/[{[]/);
-    if (found < 0) break;
-    const start = from + found;
-    out.push(start);
-    const end = balancedEnd(src, start);
-    if (end < 0) break;
-    from = end + 1;
+  while (out.length < MAX_STARTS) {
+    re.lastIndex = from;
+    const m = re.exec(src);
+    if (!m) break;
+    out.push(m.index);
+    const end = balancedEnd(src, m.index);
+    from = end < 0 ? m.index + 1 : end + 1;
   }
   return out;
+}
+
+// Содержимое ``` блоков. Без регулярок с откатом: на незакрытых ограждениях они дают квадратичное время.
+function fencedBlocks(t) {
+  const out = [];
+  let pos = 0;
+  for (;;) {
+    const open = t.indexOf("```", pos);
+    if (open < 0) break;
+    const nl = t.indexOf("\n", open + 3);
+    const tagOnly = nl >= 0 && nl - open < 40 && /^[\w-]*\s*$/.test(t.slice(open + 3, nl));
+    const bodyStart = tagOnly ? nl + 1 : open + 3;
+    const close = t.indexOf("```", bodyStart);
+    if (close < 0) break;
+    out.push(t.slice(bodyStart, close));
+    pos = close + 3;
+  }
+  return out;
+}
+
+// Убирает рассуждения, попавшие в content. Незакрытый <think> значит, что до ответа модель не дошла.
+function stripThink(t) {
+  const open = /<(think|thinking|reasoning)>/gi;
+  let out = "";
+  let pos = 0;
+  let m;
+  while ((m = open.exec(t))) {
+    out += t.slice(pos, m.index);
+    const closeRe = new RegExp(`</${m[1]}>`, "gi");
+    closeRe.lastIndex = m.index + m[0].length;
+    const c = closeRe.exec(t);
+    if (!c) return out;
+    pos = c.index + c[0].length;
+    open.lastIndex = pos;
+  }
+  out += t.slice(pos);
+  // Открывающий тег у некоторых провайдеров срезан: всё до одиночного закрывающего это рассуждения.
+  const stray = /<\/(?:think|thinking|reasoning)>/i.exec(out);
+  return stray ? out.slice(stray.index + stray[0].length) : out;
 }
 
 // Разбирает JSON из ответа модели и сообщает, пришлось ли его чинить.
 // Снимает <think>-блоки и ```-обёртки, игнорирует текст до и после, чинит типичные ошибки моделей:
 // неэкранированные кавычки внутри строк, висячие запятые, комментарии, одинарные кавычки, оборванный конец.
-export function parseModelJson(text) {
+//
+// Кандидатов собираем со всех начал и источников и выбираем лучшего. Сноска «[1]» или «{}» в прозе тоже
+// валидный JSON, поэтому «первый разобравшийся» не годится. Лучший: больше всего ожидаемых ключей корня
+// (opts.expect), потом объект, а не массив, потом больший размер, потом нечинённый.
+export function parseModelJson(text, { expect = [] } = {}) {
   const raw = String(text ?? "");
-  let t = raw.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "");
-  const stray = t.search(/<\/(?:think|thinking|reasoning)>/i); // открывающий тег у некоторых провайдеров срезан
-  if (stray >= 0) t = t.slice(t.indexOf(">", stray) + 1);
-
-  const sources = [...t.matchAll(/```[\w-]*\s*([\s\S]*?)```/g)].map((m) => m[1]);
-  sources.push(t);
-
-  // Варианты среза для одного начала: хвост целиком, до последней закрывающей скобки, сбалансированный кусок.
-  const slices = (src, start) => {
-    const last = src.lastIndexOf(src[start] === "{" ? "}" : "]");
-    const end = balancedEnd(src, start);
-    return {
-      balanced: end >= 0 ? src.slice(start, end + 1) : null,
-      tail: src.slice(start),
-      toLast: last > start ? src.slice(start, last + 1) : null,
-    };
-  };
+  const t = stripThink(raw);
+  const sources = [...fencedBlocks(t), t];
 
   let firstError = null;
   const note = (e) => (firstError ??= e);
+  const candidates = [];
 
-  // Проход 1: обычный JSON.parse.
   for (const src of sources) {
-    for (const start of topStarts(src)) {
-      const { balanced, toLast } = slices(src, start);
+    let repairs = 0;
+    for (const start of startsOf(src)) {
+      const last = src.lastIndexOf(src[start] === "{" ? "}" : "]");
+      const end = balancedEnd(src, start);
+      const balanced = end >= 0 ? src.slice(start, end + 1) : null;
+      const toLast = last > start ? src.slice(start, last + 1) : null;
+
+      let found = null;
       for (const slice of new Set([balanced, toLast])) {
         if (slice === null) continue;
         try {
-          const v = JSON.parse(slice);
-          if (isObj(v)) return { value: v, repaired: false };
+          found = { value: JSON.parse(slice), repaired: false };
+          break;
         } catch (e) {
           note(e);
         }
       }
-    }
-  }
-
-  // Проход 2: ремонт. Из всех начал берём самый полный результат: так мусорная скобка в прозе
-  // вроде «[фото 1]» не побеждает настоящий ответ.
-  for (const src of sources) {
-    let best = null;
-    let bestLen = 0;
-    for (const start of topStarts(src)) {
-      const { tail, toLast, balanced } = slices(src, start);
-      for (const slice of new Set([tail, toLast, balanced])) {
-        if (slice === null) continue;
-        try {
-          const v = JSON.parse(jsonrepair(slice));
-          const len = plausible(v) ? JSON.stringify(v).length : 0;
-          if (len > 2 && len > bestLen) {
-            best = v;
-            bestLen = len;
+      if (!found && repairs < MAX_REPAIRS) {
+        repairs++;
+        for (const slice of new Set([src.slice(start), toLast, balanced])) {
+          if (slice === null) continue;
+          try {
+            const value = JSON.parse(jsonrepair(slice));
+            // jsonrepair склеивает несколько корневых значений в массив: «{...} [1]» это не наш объект.
+            if (Array.isArray(value) !== (src[start] === "[")) continue;
+            found = { value, repaired: true };
+            break;
+          } catch (e) {
+            note(e);
           }
-          if (len > 2) break;
-        } catch (e) {
-          note(e);
         }
       }
+      if (found && found.value !== null && typeof found.value === "object") candidates.push(found);
     }
-    if (best) return { value: best, repaired: true };
   }
 
+  const scored = candidates
+    .map((c) => {
+      let value = c.value;
+      const rec = isRecord(value);
+      // Ответ в обёртке {"analysis": {...}}: достаём вложенный объект, если в нём ожидаемые ключи.
+      if (rec && expect.length && !expect.some((k) => k in value)) {
+        const keys = Object.keys(value);
+        if (keys.length === 1 && isRecord(value[keys[0]]) && expect.some((k) => k in value[keys[0]])) value = value[keys[0]];
+      }
+      const isRec = isRecord(value);
+      return {
+        value,
+        repaired: c.repaired,
+        plausible: isRec ? Object.keys(value).length > 0 : value.some((x) => x !== null && typeof x === "object"),
+        hits: isRec ? expect.filter((k) => k in value).length : 0,
+        isRec,
+        size: JSON.stringify(value).length,
+      };
+    })
+    .filter((c) => c.plausible)
+    .sort((a, b) => b.hits - a.hits || Number(b.isRec) - Number(a.isRec) || b.size - a.size || Number(a.repaired) - Number(b.repaired));
+
+  if (scored.length) return { value: scored[0].value, repaired: scored[0].repaired };
+  // Единственное, что нашлось: честный пустой объект.
+  const empty = candidates.find((c) => isRecord(c.value) && !c.repaired);
+  if (empty) return { value: empty.value, repaired: false };
   throw jsonError(raw, firstError);
 }
 
-export const extractJson = (text) => parseModelJson(text).value;
+export const extractJson = (text, opts) => parseModelJson(text, opts).value;
 
 // Сжимает фото до maxSide и возвращает JPEG data URL. Учитывает EXIF-поворот.
 export async function fileToDataUrl(file, maxSide = 1024, quality = 0.85) {

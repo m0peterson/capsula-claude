@@ -1,6 +1,9 @@
 // Данные клиента (фото, гардероб, результаты) лежат в IndexedDB браузера. Настройки и ключи в localStorage.
 // На сервер ничего не сохраняется.
 
+import { normalizeAnalysis, normalizeLooks, normalizeCapsule, normalizeSearch } from "./normalize.js";
+import { isRecord } from "./util.js";
+
 const DB_NAME = "capsula";
 const STORE = "kv";
 const SETTINGS_KEY = "capsula.settings.v1";
@@ -59,10 +62,39 @@ async function idbSet(key, value) {
   });
 }
 
+// Результаты, сохранённые старой версией, могли быть в кривой форме и ломали вкладки при открытии.
+// Приводим их к нынешней форме; то, что привести нельзя, сбрасываем (его можно пересчитать).
+export function migrate(st) {
+  const attempt = (label, fn) => {
+    try {
+      return fn();
+    } catch (e) {
+      console.warn(`Сохранённый результат «${label}» повреждён и сброшен:`, e.message);
+      return null;
+    }
+  };
+  const ids = new Set((Array.isArray(st.wardrobe) ? st.wardrobe : []).filter(isRecord).map((w) => w.id));
+  st.wardrobe = (Array.isArray(st.wardrobe) ? st.wardrobe : []).filter(isRecord);
+  st.profile = isRecord(st.profile) ? st.profile : defaultState().profile;
+  st.profile.photos = Array.isArray(st.profile.photos) ? st.profile.photos.filter((p) => typeof p === "string") : [];
+  st.profile.inputs = isRecord(st.profile.inputs) ? st.profile.inputs : {};
+  if (st.profile.analysis) st.profile.analysis = attempt("анализ", () => normalizeAnalysis(st.profile.analysis));
+  st.looks = attempt("образы", () => normalizeLooks({ looks: st.looks }, ids)) || [];
+  if (st.capsule) st.capsule = attempt("капсула", () => normalizeCapsule(st.capsule, ids));
+  st.search = isRecord(st.search) ? st.search : {};
+  for (const [k, v] of Object.entries(st.search)) {
+    st.search[k] = isRecord(v) ? { ...v, results: normalizeSearch(v.results) } : undefined;
+    if (st.search[k] === undefined) delete st.search[k];
+  }
+}
+
 export async function init() {
   try {
     const saved = await idbGet("state");
-    if (saved) Object.assign(state, defaultState(), saved);
+    if (saved) {
+      Object.assign(state, defaultState(), saved);
+      migrate(state);
+    }
   } catch (e) {
     console.warn("IndexedDB недоступен, данные не сохранятся", e);
   }
@@ -87,7 +119,8 @@ export async function init() {
   }
 }
 
-// Throttle, не debounce: запись гарантированно уходит не позже чем через 250 мс после первого изменения.
+// Throttle, не debounce: запись гарантированно уходит не позже чем через 50 мс после первого изменения.
+// Запись в IndexedDB асинхронна и при закрытии вкладки может не успеть, поэтому окно держим коротким.
 let timer = null;
 function flush() {
   if (timer === null) return;
@@ -97,10 +130,10 @@ function flush() {
 }
 
 export function save() {
-  if (timer === null) timer = setTimeout(flush, 250);
+  if (timer === null) timer = setTimeout(flush, 50);
 }
 
-// Не теряем последние правки при закрытии вкладки.
+// Дополнительная попытка при уходе со страницы. Браузер не гарантирует, что транзакция успеет завершиться.
 addEventListener("pagehide", flush);
 addEventListener("visibilitychange", () => document.visibilityState === "hidden" && flush());
 

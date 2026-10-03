@@ -23,6 +23,7 @@ function slotHtml(name, title, hint) {
       <label class="field"><span>Лимит ответа, токенов (0 = не передавать)</span>
         <input type="number" min="0" step="1000" data-slot="${name}" data-k="maxTokens" value="${esc(s.maxTokens ?? "")}" placeholder="0 = не передавать"></label>
     </div>
+    <p class="muted">Лимит ответа включает рассуждения. При effort <code>xhigh</code> часть провайдеров отдаёт рассуждениям до 95% лимита, поэтому ставьте с большим запасом (от 32000) или оставьте 0.</p>
   </section>`;
 }
 
@@ -80,7 +81,14 @@ export function render(root, ctx) {
   });
   root.querySelectorAll("[data-slot]").forEach((el) =>
     el.addEventListener("change", () => {
-      settings[el.dataset.slot][el.dataset.k] = el.type === "number" ? Number(el.value) || 0 : el.value.trim();
+      if (el.type === "number") {
+        // Лимит токенов: целое, не меньше нуля. 0 значит «не передавать».
+        const n = Math.max(0, Math.floor(Number(el.value) || 0));
+        el.value = n;
+        settings[el.dataset.slot][el.dataset.k] = n;
+      } else {
+        settings[el.dataset.slot][el.dataset.k] = el.value.trim();
+      }
       saveSettings();
       if (el.dataset.k === "provider") render(root, ctx); // обновить подсказки моделей
     }),

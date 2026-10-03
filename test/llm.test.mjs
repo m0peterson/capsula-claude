@@ -6,7 +6,7 @@ globalThis.addEventListener = () => {};
 globalThis.document = { visibilityState: "visible" };
 
 const { settings } = await import("../public/js/store.js");
-const { chat, chatJson } = await import("../public/js/llm.js");
+const { chat, chatJson, resetLearned } = await import("../public/js/llm.js");
 
 settings.providers.openrouter.apiKey = "sk-test";
 const slot = () => ({ provider: "openrouter", model: "m/x", effort: "xhigh", maxTokens: 16000 });
@@ -33,6 +33,7 @@ function mockFetch(...responses) {
 }
 
 const run = (fn) => async () => {
+  resetLearned();
   try {
     await fn();
   } finally {
@@ -183,7 +184,7 @@ test(
   "пустой ответ при finish_reason=length объясняет про рассуждения",
   run(async () => {
     mockFetch(sse([{ choices: [{ delta: { reasoning: "думаю..." }, finish_reason: null }] }, delta("", "length")]));
-    await assert.rejects(chat({ slot: slot(), messages: [] }), /лимит токенов на рассуждение/);
+    await assert.rejects(chat({ slot: slot(), messages: [] }), /исчерпан лимит токенов/);
   }),
 );
 
@@ -193,5 +194,173 @@ test(
     const m = mockFetch(jsonStream({ a: 1 }));
     await chatJson({ slot: { ...slot(), maxTokens: 0 }, system: "JSON", user: "q" });
     assert.equal(m.bodies[0].max_tokens, undefined);
+  }),
+);
+
+// --- Регрессии из состязательного ревью -----------------------------------------------------------------
+const brokenStream = (chunks, error = new TypeError("terminated")) => {
+  const enc = new TextEncoder();
+  let i = 0;
+  return new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (i < chunks.length) controller.enqueue(enc.encode(`data: ${JSON.stringify(chunks[i++])}\n\n`));
+        else controller.error(error);
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+};
+
+test(
+  "соединение порвалось посреди ответа: понятная ошибка про обрыв, текст сохранён, без повторов",
+  run(async () => {
+    const m = mockFetch(brokenStream([delta('{"a":[{"x":1},{"y":"обор')]));
+    await assert.rejects(ask(), (e) => e.truncated === true && /оборвалось/.test(e.message) && e.raw.includes("обор"));
+    assert.equal(m.bodies.length, 1);
+  }),
+);
+
+test(
+  "соединение порвалось на стадии рассуждения: обрыв, а не «пустой ответ, проверьте ключ»",
+  run(async () => {
+    mockFetch(brokenStream([{ choices: [{ delta: { reasoning: "думаю..." }, finish_reason: null }] }]));
+    await assert.rejects(ask(), (e) => e.truncated === true && /оборвалось/.test(e.message) && !/ключ/.test(e.message));
+  }),
+);
+
+test(
+  "отмена пользователем во время чтения не маскируется под обрыв",
+  run(async () => {
+    const abort = Object.assign(new Error("aborted"), { name: "AbortError" });
+    mockFetch(brokenStream([delta('{"a":')], abort));
+    await assert.rejects(ask(), (e) => e.name === "AbortError");
+  }),
+);
+
+test(
+  "finish_reason не из белого списка и JSON оборван: ошибка с причиной, без тихого ремонта",
+  run(async () => {
+    const m = mockFetch(sse([delta('{"a":[{"x":1},{"y":"обор', "content_filter")]));
+    await assert.rejects(ask(), (e) => e.truncated === true && /content_filter/.test(e.message));
+    assert.equal(m.bodies.length, 1);
+  }),
+);
+
+test(
+  "finish_reason content_filter, но JSON целый: принимаем",
+  run(async () => {
+    mockFetch(sse([delta('{"a":1}', "content_filter")]));
+    assert.deepEqual((await ask()).data, { a: 1 });
+  }),
+);
+
+test(
+  "finish_reason в разном регистре считается нормальным",
+  run(async () => {
+    mockFetch(sse([delta('{"a":"он сказал "привет" мне"}', "STOP")]));
+    assert.equal((await ask()).data.a, 'он сказал "привет" мне');
+  }),
+);
+
+test(
+  "OpenRouter: причина апстрима в metadata.raw, отбрасывается только reasoning",
+  run(async () => {
+    const wrapped = new Response(
+      JSON.stringify({
+        error: {
+          message: "Provider returned error",
+          code: 400,
+          metadata: {
+            raw: JSON.stringify({ error: { message: "Unsupported value: 'xhigh' is not supported", param: "reasoning_effort" } }),
+            provider_name: "X",
+          },
+        },
+      }),
+      { status: 400 },
+    );
+    const notices = [];
+    const m = mockFetch(wrapped, jsonStream({ a: 1 }));
+    await chatJson({ slot: slot(), system: "JSON", user: "q", onNotice: (n) => notices.push(n) });
+    assert.equal(m.bodies.length, 2);
+    assert.equal(m.bodies[1].reasoning, undefined);
+    assert.ok(m.bodies[1].response_format, "JSON-режим сохранён");
+    assert.equal(m.bodies[1].max_tokens, 16000, "лимит сохранён");
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /effort/);
+  }),
+);
+
+test(
+  "OpenAI: параметр назван только в error.param, ошибка без слов reasoning/effort в тексте",
+  run(async () => {
+    const r = new Response(
+      JSON.stringify({
+        error: {
+          message: "Unsupported value: 'xhigh' is not supported with this model.",
+          param: "reasoning_effort",
+          code: "unsupported_value",
+        },
+      }),
+      { status: 400 },
+    );
+    const m = mockFetch(r, jsonStream({ a: 1 }));
+    await ask();
+    assert.equal(m.bodies[1].reasoning, undefined);
+    assert.ok(m.bodies[1].response_format);
+    assert.equal(m.bodies[1].max_tokens, 16000);
+  }),
+);
+
+test(
+  "max_tokens не поддерживается, нужен max_completion_tokens: переименование без потери лимита",
+  run(async () => {
+    const m = mockFetch(
+      errorResponse(400, "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."),
+      jsonStream({ a: 1 }),
+    );
+    await ask();
+    assert.equal(m.bodies[1].max_tokens, undefined);
+    assert.equal(m.bodies[1].max_completion_tokens, 16000);
+    assert.ok(m.bodies[1].response_format);
+    assert.deepEqual(m.bodies[1].reasoning, { effort: "xhigh" });
+  }),
+);
+
+test(
+  "то, что провайдер не принимает, запоминается: следующий вызов сразу без параметра",
+  run(async () => {
+    const m = mockFetch(errorResponse(400, "Unsupported parameter: response_format"), jsonStream({ a: 1 }), jsonStream({ b: 2 }));
+    await ask();
+    await ask();
+    assert.equal(m.bodies.length, 3);
+    assert.equal(m.bodies[2].response_format, undefined);
+  }),
+);
+
+test(
+  "сторонний 400 про картинку не отбрасывает ни один параметр",
+  run(async () => {
+    const m = mockFetch(errorResponse(400, "Image is too large: maximum size is 20MB"));
+    await assert.rejects(ask(), /too large/);
+    assert.equal(m.bodies.length, 1);
+  }),
+);
+
+test(
+  "ошибка в потоке строкой сохраняет текст и уже полученное",
+  run(async () => {
+    mockFetch(sse([delta('{"a"'), { error: "model overloaded" }], { done: false }));
+    await assert.rejects(ask(), (e) => e.message === "model overloaded" && e.raw === '{"a"');
+  }),
+);
+
+test(
+  "посторонняя сноска [1] в тексте до JSON: ответ берётся целиком с первого раза",
+  run(async () => {
+    const m = mockFetch(sse([delta('Результаты [1]:\n{"results":[{"title":"x"}]}', "stop")]));
+    const { data } = await chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["results"] });
+    assert.deepEqual(data, { results: [{ title: "x" }] });
+    assert.equal(m.bodies.length, 1);
   }),
 );

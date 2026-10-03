@@ -1,4 +1,4 @@
-import { esc, safeHex, arr } from "./util.js";
+import { esc, safeHex, arr, isRecord } from "./util.js";
 
 export const CATEGORIES = {
   top: "Верх",
@@ -60,6 +60,7 @@ export async function runTask(statusEl, buttons, fn) {
     const result = await fn({
       signal: ctl.signal,
       onProgress: (p) => (progress = p),
+      notice: (m) => toast(m),
       setLabel: (l) => {
         label = l;
         progress = { chars: 0, thought: 0 };
@@ -81,6 +82,7 @@ export async function runTask(statusEl, buttons, fn) {
 
 export const swatches = (list, size = "") =>
   `<div class="swatches ${size}">${arr(list)
+    .filter(isRecord)
     .map(
       (c) =>
         `<div class="swatch" title="${esc(c.name)} ${esc(c.hex)}"><span class="chip" style="background:${safeHex(c.hex)}"></span><span class="sw-name">${esc(c.name)}</span></div>`,
@@ -100,4 +102,15 @@ export function readImages(input, handler) {
     input.value = "";
     if (files.length) await handler(files);
   });
+}
+
+// Рисует сохранённый результат. Если данные из старой версии повреждены, показываем понятное сообщение,
+// а не пустую вкладку без кнопок.
+export function safeHtml(render) {
+  try {
+    return render();
+  } catch (e) {
+    console.warn("Не удалось показать сохранённый результат:", e);
+    return `<div class="error"><strong>Сохранённый результат повреждён.</strong> Запустите расчёт заново, он заменит его.</div>`;
+  }
 }

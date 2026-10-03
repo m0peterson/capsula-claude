@@ -2,7 +2,8 @@ import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { CAPSULE_SYSTEM, profileBrief, wardrobeBrief } from "../prompts.js";
 import { esc, arr, safeHex } from "../util.js";
-import { runTask, thumb, toast, swatches, catLabel, PRIORITY } from "../ui.js";
+import { runTask, thumb, toast, swatches, catLabel, PRIORITY, safeHtml } from "../ui.js";
+import { normalizeCapsule } from "../normalize.js";
 
 const SEASONS = ["Круглый год", "Весна-лето", "Осень-зима", "Зима", "Лето"];
 
@@ -91,7 +92,7 @@ export function render(root) {
     <div class="row"><button type="button" class="primary" data-run>${state.capsule ? "Пересобрать капсулу" : "Собрать капсулу"}</button></div>
     <div data-status></div>
   </section>
-  <div data-result>${state.capsule ? capsuleView(state.capsule) : ""}</div>`;
+  <div data-result>${state.capsule ? safeHtml(() => capsuleView(state.capsule)) : ""}</div>`;
 
   root.querySelectorAll("[data-o]").forEach((el) =>
     el.addEventListener("change", () => {
@@ -105,28 +106,34 @@ export function render(root) {
   });
 
   const btn = root.querySelector("[data-run]");
+  const resultEl = root.querySelector("[data-result]");
+  const statusEl = root.querySelector("[data-status]");
   btn.addEventListener("click", async () => {
     const problem = slotProblem(settings.stylist);
     if (problem) return toast(problem, "error");
     const useW = o.useWardrobe && n > 0;
-    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel }) => {
+    const ok = await runTask(statusEl, [btn], async ({ signal, onProgress, setLabel, notice }) => {
       setLabel("Собираю капсулу");
       const { data } = await chatJson({
         slot: settings.stylist,
         system: CAPSULE_SYSTEM,
         user: `Клиент:\n${profileBrief(state)}\n\nГардероб клиента (id: описание):\n${useW ? wardrobeBrief(state.wardrobe) : "Не используем, собираем капсулу с нуля."}\n\nЗапрос:\n- размер капсулы: до ${o.size} вещей\n- сезон: ${o.season}\n- бюджет на докупку: ${o.budget || "не ограничен"}\n- пожелания: ${state.wishes || "нет"}`,
+        expect: ["buy", "keep", "concept"],
         signal,
         onProgress,
+        onNotice: notice,
       });
-      if (!Array.isArray(data.buy) && !Array.isArray(data.keep)) throw new Error("Модель вернула неполную капсулу. Попробуйте ещё раз.");
-      data.buy = arr(data.buy).map((b, i) => ({ ...b, id: b.id || `b${i + 1}` }));
-      state.capsule = data;
+      // Нормализуем и рисуем до сохранения: кривой ответ не должен затереть прежнюю капсулу.
+      const capsule = normalizeCapsule(data, new Set(state.wardrobe.map((w) => w.id)));
+      const html = capsuleView(capsule);
+      state.capsule = capsule;
       state.search = {};
       save();
+      return html;
     });
-    if (ok) {
-      root.querySelector("[data-result]").innerHTML = capsuleView(state.capsule);
-      btn.textContent = "Пересобрать капсулу";
+    if (typeof ok === "string") {
+      if (resultEl.isConnected) resultEl.innerHTML = ok;
+      if (btn.isConnected) btn.textContent = "Пересобрать капсулу";
     }
   });
 }

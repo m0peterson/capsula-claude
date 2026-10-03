@@ -2,7 +2,8 @@ import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { ANALYSIS_SYSTEM } from "../prompts.js";
 import { esc, arr, fileToDataUrl } from "../util.js";
-import { runTask, swatches, toast, readImages } from "../ui.js";
+import { runTask, swatches, toast, readImages, safeHtml } from "../ui.js";
+import { normalizeAnalysis } from "../normalize.js";
 
 const MAX_PHOTOS = 3;
 
@@ -89,7 +90,7 @@ export function render(root) {
     <div class="row"><button type="button" class="primary" data-analyze>Проанализировать</button></div>
     <div data-status></div>
   </section>
-  <div data-result>${renderAnalysis(profile.analysis)}</div>`;
+  <div data-result>${safeHtml(() => renderAnalysis(profile.analysis))}</div>`;
 
   readImages(root.querySelector("[data-photos]") || document.createElement("input"), async (files) => {
     try {
@@ -119,12 +120,13 @@ export function render(root) {
   });
 
   const btn = root.querySelector("[data-analyze]");
+  const resultEl = root.querySelector("[data-result]");
   btn.addEventListener("click", async () => {
     const status = root.querySelector("[data-status]");
     const problem = slotProblem(settings.vision);
     if (problem) return toast(problem, "error");
     if (!profile.photos.length) return toast("Добавьте хотя бы одно фото", "error");
-    const result = await runTask(status, [btn], async ({ signal, onProgress, setLabel }) => {
+    const result = await runTask(status, [btn], async ({ signal, onProgress, setLabel, notice }) => {
       setLabel("Анализирую фото");
       const form = Object.entries(profile.inputs)
         .filter(([, v]) => v)
@@ -135,13 +137,19 @@ export function render(root) {
         system: ANALYSIS_SYSTEM,
         user: `Анкета клиента:\n${form || "не заполнена"}\n\nПожелания по стилю: ${state.wishes || "нет"}\n\nФото клиента во вложении (${profile.photos.length} шт.).`,
         images: profile.photos,
+        expect: ["color_type", "body"],
         signal,
         onProgress,
+        onNotice: notice,
       });
-      if (!data?.color_type || !data?.body) throw new Error("Модель вернула неполный анализ. Попробуйте ещё раз или смените модель.");
-      profile.analysis = data;
+      // Сначала приводим к форме и отрисовываем, и только потом сохраняем: кривой ответ не должен затереть прежний анализ.
+      const analysis = normalizeAnalysis(data);
+      const html = renderAnalysis(analysis);
+      profile.analysis = analysis;
       save();
+      return html;
     });
-    if (result) root.querySelector("[data-result]").innerHTML = renderAnalysis(profile.analysis);
+    // Узел берём из замыкания: за время анализа пользователь мог уйти на другую вкладку.
+    if (typeof result === "string" && resultEl.isConnected) resultEl.innerHTML = result;
   });
 }

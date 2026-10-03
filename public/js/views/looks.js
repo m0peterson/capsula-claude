@@ -2,7 +2,8 @@ import { state, settings, save } from "../store.js";
 import { chatJson, slotProblem } from "../llm.js";
 import { LOOKS_SYSTEM, profileBrief, wardrobeBrief } from "../prompts.js";
 import { esc, arr } from "../util.js";
-import { runTask, thumb, toast, emptyState } from "../ui.js";
+import { runTask, thumb, toast, emptyState, safeHtml } from "../ui.js";
+import { normalizeLooks } from "../normalize.js";
 
 export function lookCard(look, byId) {
   const items = arr(look.item_ids)
@@ -17,11 +18,9 @@ export function lookCard(look, byId) {
   </article>`;
 }
 
-function paint(root) {
+function looksHtml(looks) {
   const byId = new Map(state.wardrobe.map((w) => [w.id, w]));
-  root.querySelector("[data-looks]").innerHTML = state.looks.length
-    ? state.looks.map((l) => lookCard(l, byId)).join("")
-    : emptyState("Образов пока нет.");
+  return looks.length ? looks.map((l) => lookCard(l, byId)).join("") : emptyState("Образов пока нет.");
 }
 
 export function render(root, ctx) {
@@ -42,7 +41,8 @@ export function render(root, ctx) {
     <div data-status></div>
   </section>
   <div class="looks" data-looks></div>`;
-  paint(root);
+  const looksEl = root.querySelector("[data-looks]");
+  looksEl.innerHTML = safeHtml(() => looksHtml(state.looks));
 
   root.querySelector("[data-wishes]").addEventListener("input", (e) => {
     state.wishes = e.target.value;
@@ -54,23 +54,24 @@ export function render(root, ctx) {
     const problem = slotProblem(settings.stylist);
     if (problem) return toast(problem, "error");
     const count = Math.min(12, Math.max(3, Number(root.querySelector("[data-count]").value) || 6));
-    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel }) => {
+    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel, notice }) => {
       setLabel("Собираю образы");
       const { data } = await chatJson({
         slot: settings.stylist,
         system: LOOKS_SYSTEM,
         user: `Клиент:\n${profileBrief(state)}\n\nГардероб (id: описание):\n${wardrobeBrief(state.wardrobe)}\n\nПожелания: ${state.wishes || "нет"}\n\nСоставь ${count} образов.`,
+        expect: ["looks"],
         signal,
         onProgress,
+        onNotice: notice,
       });
-      const valid = new Set(state.wardrobe.map((w) => w.id));
-      const looks = arr(data.looks)
-        .map((l) => ({ ...l, item_ids: arr(l.item_ids).filter((id) => valid.has(id)) }))
-        .filter((l) => l.item_ids.length >= 2);
+      const looks = normalizeLooks(data, new Set(state.wardrobe.map((w) => w.id)));
       if (!looks.length) throw new Error("Модель не вернула ни одного образа из ваших вещей. Попробуйте ещё раз.");
+      const html = looksHtml(looks);
       state.looks = looks;
       save();
+      return html;
     });
-    if (ok) paint(root);
+    if (typeof ok === "string" && looksEl.isConnected) looksEl.innerHTML = ok;
   });
 }

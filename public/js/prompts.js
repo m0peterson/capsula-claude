@@ -1,3 +1,6 @@
+import { arr, isRecord } from "./util.js";
+import { normalizeAnalysis, list, text } from "./normalize.js";
+
 // Промпты стилиста. Ответы просим строго в JSON, ключи на английском, тексты на русском.
 
 const BASE = `Ты профессиональный стилист-имиджмейкер с опытом цветотипирования, работы с пропорциями и сборки капсульных гардеробов.
@@ -105,30 +108,40 @@ export const SEARCH_SYSTEM = `${BASE}
 Нужно 5-8 результатов.`;
 
 export function profileBrief(state) {
-  const { inputs = {}, analysis } = state.profile;
+  const { inputs = {} } = state.profile;
   const lines = [];
   const map = { gender: "Пол", age: "Возраст", height: "Рост, см", size: "Размер одежды", city: "Город или климат", budget: "Бюджет" };
   for (const [k, label] of Object.entries(map)) if (inputs[k]) lines.push(`${label}: ${inputs[k]}`);
+
+  // Повторная нормализация защищает от данных старой версии, сохранённых в кривой форме.
+  let analysis = null;
+  try {
+    if (state.profile.analysis) analysis = normalizeAnalysis(state.profile.analysis);
+  } catch {
+    /* повреждённый анализ не учитываем */
+  }
   if (analysis) {
-    const c = analysis.color_type || {};
-    const b = analysis.body || {};
+    const c = analysis.color_type;
+    const b = analysis.body;
+    const named = (x) => `${x.name} ${x.hex}`;
     lines.push(`Цветотип: ${c.season || "?"} (${c.undertone || "?"}, контраст ${c.contrast || "?"})`);
-    if (c.best_colors?.length) lines.push(`Лучшие цвета: ${c.best_colors.map((x) => `${x.name} ${x.hex}`).join(", ")}`);
-    if (c.neutrals?.length) lines.push(`Нейтральные: ${c.neutrals.map((x) => `${x.name} ${x.hex}`).join(", ")}`);
-    if (c.avoid_colors?.length) lines.push(`Избегать: ${c.avoid_colors.map((x) => x.name).join(", ")}`);
-    lines.push(`Фигура: ${b.figure_type || "?"}; ${b.proportions || ""}; цели: ${(b.goals || []).join("; ")}`);
-    if (analysis.styles?.length) lines.push(`Подходящие стили: ${analysis.styles.map((s) => s.name).join(", ")}`);
-    for (const s of analysis.silhouettes || []) lines.push(`Силуэты (${s.zone}): ${s.recommend}. Избегать: ${s.avoid}`);
+    if (c.best_colors.length) lines.push(`Лучшие цвета: ${c.best_colors.map(named).join(", ")}`);
+    if (c.neutrals.length) lines.push(`Нейтральные: ${c.neutrals.map(named).join(", ")}`);
+    if (c.avoid_colors.length) lines.push(`Избегать: ${c.avoid_colors.map((x) => x.name).join(", ")}`);
+    lines.push(`Фигура: ${b.figure_type || "?"}; ${b.proportions}; цели: ${b.goals.join("; ")}`);
+    if (analysis.styles.length) lines.push(`Подходящие стили: ${analysis.styles.map((x) => x.name).join(", ")}`);
+    for (const x of analysis.silhouettes) lines.push(`Силуэты (${x.zone}): ${x.recommend}. Избегать: ${x.avoid}`);
   }
   return lines.join("\n") || "Данных о клиенте нет.";
 }
 
 export function wardrobeBrief(items) {
-  if (!items.length) return "Гардероб пуст.";
-  return items
+  const rows = arr(items).filter(isRecord);
+  if (!rows.length) return "Гардероб пуст.";
+  return rows
     .map(
       (w) =>
-        `${w.id}: ${w.name} | ${w.category} | ${w.color || "?"} ${w.color_hex || ""} | ${w.material || "-"} | ${w.style || "-"} | сезоны: ${(w.seasons || []).join(",") || "-"} | формальность ${w.formality ?? "-"} | ${w.notes || ""}`,
+        `${text(w.id)}: ${text(w.name)} | ${text(w.category)} | ${text(w.color) || "?"} ${text(w.color_hex)} | ${text(w.material) || "-"} | ${text(w.style) || "-"} | сезоны: ${list(w.seasons).join(",") || "-"} | формальность ${w.formality ?? "-"} | ${text(w.notes)}`,
     )
     .join("\n");
 }

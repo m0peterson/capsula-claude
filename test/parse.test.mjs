@@ -66,3 +66,94 @@ test("пустой объект допустим, проза со скобкам
     );
   }
 });
+
+// --- Регрессии из состязательного ревью -----------------------------------------------------------------
+const J = '{"color_type":{"season":"осень"},"body":{"type":"груша"}}';
+const JV = { color_type: { season: "осень" }, body: { type: "груша" } };
+const EXPECT = { expect: ["color_type", "body"] };
+
+test("валидные, но посторонние фрагменты в прозе до ответа не побеждают его", () => {
+  for (const prose of [
+    "Анализ [1]:",
+    "Размеры [42, 44, 46] подойдут.",
+    "- [ ] Проверить",
+    "Пустой объект {} не нужен.",
+    "Ссылки [1](https://a.b) и [2]:",
+  ]) {
+    const r = parseModelJson(`${prose}\n${J}`, EXPECT);
+    assert.deepEqual(r.value, JV, prose);
+    assert.equal(r.repaired, false);
+  }
+});
+
+test("битый ответ побеждает валидный мусор после него", () => {
+  const broken = '{"color_type":{"season":"он сказал "осень" мне"},"body":{"type":"груша"}}';
+  for (const tail of ["\nПримечание: см. [1]", '\nФормат: {"ok":true}', "\n[42, 44]"]) {
+    const r = parseModelJson(broken + tail, EXPECT);
+    assert.equal(r.repaired, true, tail);
+    assert.equal(r.value.color_type.season, 'он сказал "осень" мне', tail);
+    assert.deepEqual(r.value.body, { type: "груша" });
+  }
+});
+
+test("незакрытая скобка в прозе до ответа не оборачивает ответ", () => {
+  assert.deepEqual(parseModelJson(`Анализ [фото:\n${J}`, EXPECT).value, JV);
+  assert.deepEqual(parseModelJson(`Анализ {фото:\n${J}`, EXPECT).value, JV);
+});
+
+test("много скобочных групп в прозе до ответа", () => {
+  const prose = Array.from({ length: 12 }, (_, i) => `[${i + 1}]`).join(" ");
+  assert.deepEqual(parseModelJson(`${prose}\n${J}`, EXPECT).value, JV);
+});
+
+test("три бэктика внутри строки не отнимают ответ", () => {
+  const withFence = '{"color_type":{"season":"осень"},"body":{"type":"груша"},"note":"пример: ```json [{\\"id\\":1}] ``` конец"}';
+  const r = parseModelJson(withFence, EXPECT);
+  assert.equal(r.value.color_type.season, "осень");
+  assert.equal(r.value.body.type, "груша");
+});
+
+test("незакрытый <think> с черновиком JSON не принимается за ответ", () => {
+  assert.throws(() => parseModelJson('<think>черновик: {"items":[]} подумаю ещё'));
+  assert.deepEqual(parseModelJson(`<think>раз</think>${J}`, EXPECT).value, JV);
+  assert.deepEqual(parseModelJson(`<THINK>раз {x}</THINK>${J}`, EXPECT).value, JV);
+});
+
+test("ответ в обёртке с одним ключом разворачивается, если ждём другие ключи", () => {
+  assert.deepEqual(parseModelJson(`{"analysis":${J}}`, EXPECT).value, JV);
+  assert.deepEqual(parseModelJson('{"analysis":{"x":1}}', EXPECT).value, { analysis: { x: 1 } });
+});
+
+test("expect выбирает нужный объект среди нескольких", () => {
+  const r = parseModelJson('{"meta":{"a":1,"b":2,"c":3,"d":4}}\n{"items":[1]}', { expect: ["items"] });
+  assert.deepEqual(r.value, { items: [1] });
+});
+
+test("скорость: ответы около 200 КБ и патологические входы", () => {
+  const big = {
+    items: Array.from({ length: 1500 }, (_, i) => ({
+      index: i,
+      name: `Вещь номер ${i} с длинным описанием крой ткань сезон`,
+      notes: "x".repeat(80),
+    })),
+  };
+  const bigText = JSON.stringify(big);
+  assert.ok(bigText.length > 190_000, `размер ${bigText.length}`);
+
+  const timed = (label, fn, limitMs = 1500) => {
+    const t0 = performance.now();
+    const out = fn();
+    const ms = performance.now() - t0;
+    assert.ok(ms < limitMs, `${label}: ${Math.round(ms)} мс`);
+    return out;
+  };
+
+  assert.equal(timed("чистый", () => parseModelJson(bigText, { expect: ["items"] })).value.items.length, 1500);
+  const cut = bigText.slice(0, Math.floor(bigText.length * 0.7));
+  assert.ok(timed("оборванный", () => parseModelJson(cut, { expect: ["items"] })).value.items.length > 900);
+  const quoted = bigText.replace('"Вещь номер 700', '"он сказал "привет" Вещь номер 700');
+  assert.equal(timed("битый", () => parseModelJson(quoted, { expect: ["items"] })).repaired, true);
+  assert.throws(() => timed("незакрытое ограждение и пробелы", () => parseModelJson("```" + " ".repeat(200_000))));
+  assert.throws(() => timed("много think", () => parseModelJson("<think>".repeat(20_000))));
+  assert.throws(() => timed("много скобок", () => parseModelJson("[".repeat(100_000))));
+});

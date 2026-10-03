@@ -32,42 +32,88 @@ function reasoningParams(slot) {
   return slot.provider === "openrouter" ? { reasoning: { effort: slot.effort } } : { reasoning_effort: slot.effort };
 }
 
+// Разбор ответа провайдера с ошибкой. OpenRouter прячет причину апстрима в error.metadata.raw,
+// OpenAI называет параметр в error.param, часть серверов шлёт error строкой.
 async function readError(res) {
-  const text = await res.text().catch(() => "");
+  const body = await res.text().catch(() => "");
+  let j = null;
   try {
-    const j = JSON.parse(text);
-    return j.error?.message || j.message || text;
+    j = JSON.parse(body);
   } catch {
-    return text || res.statusText;
+    /* не JSON */
   }
+  const e = j?.error;
+  const message = (typeof e === "string" ? e : e?.message) || j?.message || body || res.statusText || String(res.status);
+  const parts = [message];
+  let shown = message;
+  if (e && typeof e === "object") {
+    for (const k of ["param", "code"]) if (typeof e[k] === "string") parts.push(e[k]);
+    const raw = e.metadata?.raw;
+    if (raw) {
+      const rawStr = typeof raw === "string" ? raw : JSON.stringify(raw);
+      parts.push(rawStr);
+      let inner = rawStr;
+      try {
+        const r = JSON.parse(rawStr);
+        const er = r.error ?? r;
+        inner = (typeof er === "string" ? er : er?.message) || rawStr;
+        if (typeof er?.param === "string") parts.push(er.param);
+      } catch {
+        /* raw не JSON */
+      }
+      if (!message.includes(inner)) shown = `${message}: ${inner.slice(0, 400)}`;
+    }
+  }
+  return { text: shown, detail: parts.join(" ") };
 }
 
-// Необязательные параметры, которые можно отбросить, если провайдер их не принимает.
-const OPTIONAL_PATTERNS = {
-  json: /response_format|json|schema|structured/i,
-  maxTokens: /max_tokens|max_completion_tokens|maximum|too large|context length|exceed/i,
-  reasoning: /reason|effort|thinking/i,
+// Необязательные параметры: если провайдер называет такой параметр в ошибке, отбрасываем именно его.
+const NAMED = {
+  json: /response_format|json_object|json_schema|structured[ _]output/i,
+  maxTokens: /max_tokens|max_completion_tokens/i,
+  reasoning: /reasoning|effort/i,
+};
+const GENERIC_UNSUPPORTED =
+  /unsupported (parameter|value)|unknown (parameter|field|argument)|unrecognized (request )?(argument|parameter)|extra inputs|not supported/i;
+
+function nextStep(detail, active) {
+  for (const k of ["json", "maxTokens", "reasoning"]) {
+    if (!active[k] || !NAMED[k].test(detail)) continue;
+    // У reasoning-моделей OpenAI вместо max_tokens нужен max_completion_tokens: переименовываем, а не теряем лимит.
+    if (k === "maxTokens" && active.maxField === "max_tokens" && /max_completion_tokens/i.test(detail)) return { rename: true };
+    return { drop: k };
+  }
+  // Ошибка без названия параметра: из необязательных чаще всего виноват effort (xhigh знают не все).
+  if (GENERIC_UNSUPPORTED.test(detail) && active.reasoning) return { drop: "reasoning" };
+  return null;
+}
+
+const DROP_NOTICE = {
+  json: "Провайдер не принял JSON-режим, ответ придётся разбирать из текста.",
+  maxTokens: "Провайдер не принял лимит ответа, запрос выполнен без него.",
+  reasoning: "Провайдер не принял режим рассуждения (effort), запрос выполнен без него.",
 };
 
-function pickDrop(msg, active) {
-  const named = Object.keys(OPTIONAL_PATTERNS).find((k) => active[k] && OPTIONAL_PATTERNS[k].test(msg));
-  if (named) return named;
-  if (!/unsupported|unknown|invalid|not support|parameter|param/i.test(msg)) return null;
-  return ["json", "maxTokens", "reasoning"].find((k) => active[k]) || null;
-}
+// Что провайдер не принимает, помним до перезагрузки страницы, чтобы не слать заведомо отклоняемый запрос
+// (с фото это ещё и до 5 МБ лишнего трафика на каждый вызов).
+const learned = new Map();
+export const resetLearned = () => learned.clear();
 
 // Один запрос к модели со стримингом. Возвращает { text, annotations, truncated, finish }.
-// Если провайдер отвечает 400 на необязательный параметр (reasoning, response_format, max_tokens),
-// запрос повторяется без него.
-export async function chat({ slot, messages, extra = {}, onProgress, signal }) {
+// Если провайдер отвечает 400/422 на необязательный параметр (reasoning, response_format, лимит токенов),
+// запрос повторяется без него либо с переименованным параметром.
+export async function chat({ slot, messages, extra = {}, onProgress, onNotice, signal }) {
   const problem = slotProblem(slot);
   if (problem) throw new Error(problem);
 
   const { response_format, ...rest } = extra;
+  const key = `${slot.provider}|${slot.model}|${slot.effort}|${slot.maxTokens}`;
+  const memo = learned.get(key) || {};
   const active = {
-    reasoning: Boolean(slot.effort),
-    json: Boolean(response_format),
-    maxTokens: Number(slot.maxTokens) > 0,
+    reasoning: Boolean(slot.effort) && memo.reasoning !== false,
+    json: Boolean(response_format) && memo.json !== false,
+    maxTokens: Number(slot.maxTokens) > 0 && memo.maxTokens !== false,
+    maxField: memo.maxField || "max_tokens",
   };
 
   for (let attempt = 0; ; attempt++) {
@@ -76,7 +122,7 @@ export async function chat({ slot, messages, extra = {}, onProgress, signal }) {
       messages,
       stream: true,
       ...(active.reasoning ? reasoningParams(slot) : {}),
-      ...(active.maxTokens ? { max_tokens: Number(slot.maxTokens) } : {}),
+      ...(active.maxTokens ? { [active.maxField]: Math.floor(Number(slot.maxTokens)) } : {}),
       ...(active.json ? { response_format } : {}),
       ...rest,
     };
@@ -88,21 +134,56 @@ export async function chat({ slot, messages, extra = {}, onProgress, signal }) {
     });
     if (res.ok) return readStream(res, onProgress);
 
-    const msg = await readError(res);
-    const drop = attempt < 3 && (res.status === 400 || res.status === 422) ? pickDrop(msg, active) : null;
-    if (!drop) throw new Error(`${slot.provider}: ${msg || res.status}`);
-    active[drop] = false;
+    const err = await readError(res);
+    const step = attempt < 3 && (res.status === 400 || res.status === 422) ? nextStep(err.detail, active) : null;
+    if (!step) throw new Error(`${slot.provider}: ${err.text}`);
+    if (step.rename) {
+      active.maxField = "max_completion_tokens";
+      learned.set(key, { ...memo, ...learned.get(key), maxField: active.maxField });
+    } else {
+      active[step.drop] = false;
+      learned.set(key, { ...memo, ...learned.get(key), [step.drop]: false });
+      onNotice?.(DROP_NOTICE[step.drop]);
+    }
   }
+}
+
+// Завершения, после которых ответ считается целым. Всё остальное (length, content_filter, error, ...) это обрыв.
+const COMPLETE_FINISH = /^(stop|end_turn|stop_sequence|tool_calls|function_call|completed|eos|eos_token)$/i;
+
+const errText = (e) => (typeof e === "string" ? e : e?.message || JSON.stringify(e));
+
+// Ошибка «ответ не дошёл целиком». Данные потеряны, поэтому чинить такой ответ нельзя.
+export function cutError({ finish, text = "" }) {
+  let message;
+  if (finish === "length") {
+    message =
+      "Ответ модели обрезан: исчерпан лимит токенов (рассуждения тоже тратят лимит). Задайте или увеличьте «Лимит ответа» либо снизьте effort в настройках.";
+  } else if (finish) {
+    message = `Провайдер остановил ответ (finish_reason: ${finish}). Часто это фильтр содержимого или сбой у провайдера. Повторите запрос или смените модель.`;
+  } else {
+    message =
+      "Соединение оборвалось до конца ответа. На Netlify так бывает из-за таймаута функции: при effort xhigh ответы идут долго. Снизьте effort до high или medium в настройках либо разверните приложение на Cloudflare Pages.";
+  }
+  const err = new Error(message);
+  err.raw = text;
+  err.truncated = true;
+  return err;
 }
 
 async function readStream(res, onProgress) {
   const type = res.headers.get("content-type") || "";
   if (!type.includes("text/event-stream")) {
     const j = await res.json();
-    if (j.error) throw new Error(j.error.message || "Ошибка провайдера");
-    const msg = j.choices?.[0]?.message;
-    const finish = j.choices?.[0]?.finish_reason || null;
-    return { text: msg?.content || "", annotations: msg?.annotations || [], finish, truncated: finish === "length" };
+    if (j.error) throw new Error(errText(j.error) || "Ошибка провайдера");
+    const choice = j.choices?.[0];
+    const finish = choice?.finish_reason || null;
+    return {
+      text: choice?.message?.content || "",
+      annotations: choice?.message?.annotations || [],
+      finish,
+      truncated: Boolean(finish) && !COMPLETE_FINISH.test(finish),
+    };
   }
 
   const reader = res.body.getReader();
@@ -112,6 +193,7 @@ async function readStream(res, onProgress) {
   let thought = 0;
   let finish = null;
   let sawDone = false;
+  let readFailure = null;
   const annotations = [];
 
   const handle = (line) => {
@@ -128,7 +210,11 @@ async function readStream(res, onProgress) {
     } catch {
       return;
     }
-    if (chunk.error) throw new Error(chunk.error.message || "Ошибка провайдера в потоке");
+    if (chunk.error) {
+      const err = new Error(errText(chunk.error) || "Ошибка провайдера в потоке");
+      err.raw = text;
+      throw err;
+    }
     const choice = chunk.choices?.[0];
     if (choice?.finish_reason) finish = choice.finish_reason;
     const delta = choice?.delta || choice?.message || {};
@@ -139,25 +225,31 @@ async function readStream(res, onProgress) {
     onProgress?.({ chars: text.length, thought });
   };
 
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      handle(buf.slice(0, nl).trim());
-      buf = buf.slice(nl + 1);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        handle(buf.slice(0, nl).trim());
+        buf = buf.slice(nl + 1);
+      }
     }
+    if (buf.trim()) handle(buf.trim());
+  } catch (e) {
+    // Соединение порвалось посреди ответа (таймаут функции, сброс сокета). Отмену пользователем не прячем.
+    if (e?.name === "AbortError" || e?.raw !== undefined) throw e;
+    readFailure = e;
+    console.warn("Поток ответа оборвался:", e);
   }
-  if (buf.trim()) handle(buf.trim());
+
   // Поток без finish_reason и без [DONE] оборвался: таймаут функции хостинга, разрыв соединения.
-  const truncated = finish === "length" || (!finish && !sawDone);
+  const complete = finish ? COMPLETE_FINISH.test(finish) : sawDone && !readFailure;
+  const truncated = !complete;
   if (!text.trim()) {
-    throw new Error(
-      truncated && finish === "length"
-        ? "Модель исчерпала лимит токенов на рассуждение и не успела написать ответ. Задайте или увеличьте «Лимит ответа» или снизьте effort в настройках."
-        : "Модель вернула пустой ответ. Проверьте название модели и ключ.",
-    );
+    if (truncated) throw cutError({ finish, text });
+    throw new Error("Модель вернула пустой ответ. Проверьте название модели и ключ.");
   }
   return { text, annotations, truncated, finish };
 }
@@ -167,42 +259,32 @@ export function userContent(text, images = []) {
   return [{ type: "text", text }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))];
 }
 
-function truncatedError(result) {
-  const err = new Error(
-    result.finish === "length"
-      ? "Ответ модели обрезан: исчерпан лимит токенов (рассуждения тоже тратят лимит). Задайте или увеличьте «Лимит ответа» или снизьте effort в настройках."
-      : "Соединение оборвалось до конца ответа. На Netlify так бывает из-за таймаута функции: при effort xhigh ответы идут долго. Снизьте effort до high или medium в настройках либо разверните приложение на Cloudflare Pages.",
-  );
-  err.raw = result.text;
-  err.truncated = true;
-  return err;
-}
-
 // Разбирает ответ как JSON. Если ответ обрезан, чинить его нельзя: данные потеряны, и мы не выдаём половину за целое.
-function parseResult(result) {
+function parseResult(result, expect) {
   let parsed;
   try {
-    parsed = parseModelJson(result.text);
+    parsed = parseModelJson(result.text, { expect });
   } catch (e) {
-    if (result.truncated) throw truncatedError(result);
+    if (result.truncated) throw cutError(result);
     throw e;
   }
-  if (parsed.repaired && result.truncated) throw truncatedError(result);
+  if (parsed.repaired && result.truncated) throw cutError(result);
   if (parsed.repaired) console.warn("Ответ модели был невалидным JSON, исправлен автоматически");
   return parsed.value;
 }
 
 // Запрос, на который модель отвечает JSON. Включает JSON-режим провайдера, чинит типичные ошибки разметки,
 // а если не вышло, один раз просит модель переслать ответ как валидный JSON.
-export async function chatJson({ slot, system, user, images = [], extra = {}, onProgress, signal }) {
-  const opts = { slot, extra: { response_format: { type: "json_object" }, ...extra }, onProgress, signal };
+// expect: ключи корня ожидаемого ответа. По ним выбирается нужный объект, если в тексте их несколько.
+export async function chatJson({ slot, system, user, images = [], extra = {}, expect = [], onProgress, onNotice, signal }) {
+  const opts = { slot, extra: { response_format: { type: "json_object" }, ...extra }, onProgress, onNotice, signal };
   const messages = [
     { role: "system", content: system },
     { role: "user", content: userContent(user, images) },
   ];
   const first = await chat({ ...opts, messages });
   try {
-    return { data: parseResult(first), annotations: first.annotations };
+    return { data: parseResult(first, expect), annotations: first.annotations };
   } catch (firstError) {
     if (firstError.truncated) throw firstError;
     console.warn("Не удалось разобрать ответ модели:", firstError.message, first.text);
@@ -218,7 +300,7 @@ export async function chatJson({ slot, system, user, images = [], extra = {}, on
       ],
     });
     try {
-      return { data: parseResult(retry), annotations: retry.annotations };
+      return { data: parseResult(retry, expect), annotations: retry.annotations };
     } catch (retryError) {
       retryError.raw = first.text;
       retryError.raw2 = retry.text;

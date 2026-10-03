@@ -2,7 +2,7 @@
 // Запуск: npm run dev (порт 8888, переменные окружения читаются как есть).
 import http from "node:http";
 import { readFile } from "node:fs/promises";
-import { Readable } from "node:stream";
+import { Readable, pipeline } from "node:stream";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleLlm } from "../lib/proxy-core.mjs";
@@ -24,15 +24,22 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname === "/api/llm") {
       const hasBody = req.method !== "GET" && req.method !== "HEAD";
+      // Клиент закрыл соединение до конца ответа: отменяем запрос к провайдеру, как это делает платформа.
+      const ctl = new AbortController();
+      res.on("close", () => {
+        if (!res.writableFinished) ctl.abort();
+      });
       const request = new Request(url, {
         method: req.method,
         headers: req.headers,
         body: hasBody ? Readable.toWeb(req) : undefined,
         duplex: "half",
+        signal: ctl.signal,
       });
       const response = await handleLlm(request, (name) => process.env[name]);
       res.writeHead(response.status, Object.fromEntries(response.headers));
-      if (response.body) Readable.fromWeb(response.body).pipe(res);
+      // pipeline, а не pipe: при обрыве потока провайдера закрывает res, а не роняет процесс необработанным 'error'.
+      if (response.body) pipeline(Readable.fromWeb(response.body), res, () => {});
       else res.end();
       return;
     }
@@ -52,4 +59,5 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, () => console.log(`http://localhost:${port}`));
+// Только loopback: сервер использует ключи из окружения, их нельзя раздавать всей локальной сети.
+server.listen(port, "127.0.0.1", () => console.log(`http://localhost:${port}`));
