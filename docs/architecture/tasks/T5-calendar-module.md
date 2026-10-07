@@ -31,7 +31,7 @@ Ship the calendar as described in calendar.md: a new module `calendar`, a "В к
 6. `model.js`: add `slice = defineSlice("calendar", { version: 1, initial, migrate })` with no `fromLegacy`, plus wrappers that pass `slice.data` to T4's pure functions and call `slice.save()`.
 7. `api.js`: `entriesBetween`, `entriesOn`, `wearStats` (calendar.md section 5).
 8. `index.js`: `requires: ["wardrobe"]`, `route: { label: "Календарь", order: 35, render }`. `init` contributes `look.actions` `{ id: "calendar.plan", label: "В календарь", run: (snapshot) => (snapshot ? openPlanDialog({ snapshot }) : toast("В образе не осталось вещей", "error")) }`. The pick step is opened only by `openPlanDialog({ pick: true, date })` from the calendar view (calendar.md section 7).
-9. `dialog.js`: the pick and form steps from calendar.md section 7, "Plan dialog".
+9. `dialog.js`: the pick and form steps from calendar.md section 7, "Plan dialog", including the form step's edit mode (`Изменить` must update the entry, never create a second one).
 10. `view.js`: route parsing, month grid, day panel, the unconfirmed list, the next 14 days and the entry card actions, per calendar.md section 7. Day and month changes use `history.replaceState`, not `location.hash`.
 11. `public/js/modules.js`: add `calendar` at the end.
 12. `public/styles.css`: a `/* Календарь */` section, every class prefixed `cal-`, only existing tokens.

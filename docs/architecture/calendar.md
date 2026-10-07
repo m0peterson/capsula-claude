@@ -199,9 +199,9 @@ Name and occasion, a status chip (`Запланирован`, `Надет`, `Н�
 A native `<dialog>` appended to `document.body`, opened with `showModal()`, removed on close. Escape closes it (native behavior). Focus returns to the element that opened it.
 
 - **Pick step** (only when opened from `Добавить образ`): one section per `look.sources` contribution, listing its snapshots as compact cards with `Выбрать`, plus a `Собрать из гардероба` section: a grid of wardrobe items with checkboxes, a name field (default `Образ`) and at least one item. A source whose `list()` is empty is not shown, and neither is the compose section when the wardrobe is empty. When nothing is left to show, the pick step shows only: `Пока не из чего выбрать: нет ни сохранённых образов, ни вещей. Добавьте вещи во вкладке «Гардероб».`
-- Calls: `openPlanDialog({ snapshot, date? })` opens the form step; `openPlanDialog({ pick: true, date })` opens the pick step. Never call it with a `null` snapshot (see section 6).
+- Calls: `openPlanDialog({ snapshot, date? })` opens the form step for a new entry; `openPlanDialog({ pick: true, date })` opens the pick step; `openPlanDialog({ entry })` opens the form step in edit mode for an existing entry, with the date, occasion and note prefilled and `Уже надет` checked when its status is `worn`. Never call it with a `null` snapshot (see section 6).
 - **Form step**: the look name and items (read-only), `Дата` (`<input type="date">`, defaulting to the selected day or today), `Повод` (prefilled from the snapshot), `Заметка`, and an `Уже надет` checkbox shown only when the date is today. Buttons `Сохранить` and `Отмена`.
-- On save: `plan()`, the toast `Образ добавлен в календарь: <formatDay(date)>`, and if the calendar route is open, its view re-renders.
+- On save, for a new entry: `plan()` (with `status: "worn"` when `Уже надет` is checked) and the toast `Образ добавлен в календарь: <formatDay(date)>`. In edit mode: `update(entry.id, { date, occasion, note })`; then, if the date is today, `setStatus(entry.id, "worn")` when `Уже надет` is checked and the entry isn't worn, or `setStatus(entry.id, "planned")` when it is unchecked and the entry was worn. Edit mode creates no new entry and shows no `Образ добавлен…` toast. Either way, if the calendar route is open, its view re-renders.
 
 ### Styles
 
