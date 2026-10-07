@@ -1,6 +1,6 @@
 # T4. Calendar core: dates, look snapshots, calendar domain logic
 
-| -                     | -                                  |
+|                       |                                    |
 | --------------------- | ---------------------------------- |
 | Depends on            | T1 merged                          |
 | Runs in parallel with | T2, T3                             |

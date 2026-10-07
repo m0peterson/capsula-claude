@@ -1,6 +1,6 @@
 # T1. Foundation: extract `lib/`, `ai/`, `shared/`, `ui/`
 
-| -                     | -                                   |
+|                       |                                     |
 | --------------------- | ----------------------------------- |
 | Depends on            | nothing                             |
 | Runs in parallel with | T2                                  |

@@ -1,6 +1,6 @@
 # T5. Calendar module: slice, UI, integration with looks and capsule
 
-| -                     | -                        |
+|                       |                          |
 | --------------------- | ------------------------ |
 | Depends on            | T3 and T4 merged         |
 | Runs in parallel with | nothing in this plan     |

@@ -1,6 +1,6 @@
 # T3. Cutover: features become modules, the app boots on the kernel
 
-| -                     | -                                                                                              |
+|                       |                                                                                                |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
 | Depends on            | T1 and T2 merged                                                                               |
 | Runs in parallel with | T4                                                                                             |

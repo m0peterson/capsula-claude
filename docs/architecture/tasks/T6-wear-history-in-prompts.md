@@ -1,6 +1,6 @@
 # T6 (optional). Wear history in stylist prompts
 
-| -          | -                                                               |
+|            |                                                                 |
 | ---------- | --------------------------------------------------------------- |
 | Depends on | T5 merged                                                       |
 | Size       | small in code. The real cost is checking prompt quality by hand |

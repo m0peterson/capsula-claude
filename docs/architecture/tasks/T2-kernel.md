@@ -1,6 +1,6 @@
 # T2. Kernel: module contract, registry, slice store, events, extension points
 
-| -                     | -                    |
+|                       |                      |
 | --------------------- | -------------------- |
 | Depends on            | nothing              |
 | Runs in parallel with | T1, T4               |
