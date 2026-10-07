@@ -55,7 +55,7 @@ No globals stubbed. At minimum:
 ### Calendar
 
 10. `migrate`: drops entries with bad dates or empty looks, fixes an unknown status to `planned`, regenerates duplicate ids, sorts by date then `createdAt`. Total on garbage (`null`, `[]`, `{ entries: "x" }`).
-11. `plan`: default status `worn` for a past date and `planned` for today and the future; the entry gets an id and timestamps from the injected `now` and `newId`.
+11. `plan`: default status `worn` for a past date and `planned` for today and the future; the entry gets an id and timestamps from the injected `now` and `newId`. `plan` with `status: "worn"` on a future date throws `Нельзя отметить образ надетым заранее`.
 12. `setStatus` to `worn` on a future date throws the message above. On a past date it works and updates `updatedAt`.
 13. `update` moving a worn entry to a future date resets it to `planned`, and the list stays sorted.
 14. `repeat` copies the snapshot (a deep copy: mutating the new one doesn't change the old one) with a new id.
