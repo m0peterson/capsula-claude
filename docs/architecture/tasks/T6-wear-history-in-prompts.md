@@ -1,6 +1,6 @@
 # T6 (optional). Wear history in stylist prompts
 
-|            |                                                                 |
+| -          | -                                                               |
 | ---------- | --------------------------------------------------------------- |
 | Depends on | T5 merged                                                       |
 | Size       | small in code. The real cost is checking prompt quality by hand |
@@ -11,7 +11,7 @@ Read first: `docs/architecture/calendar.md` section 10 and `docs/architecture/ta
 
 Looks and capsule generation take into account what the client actually wore, through a new extension point `stylist.context`, so neither module imports calendar.
 
-This changes what is sent to the model. Do it only after the calendar has been used for a while, because without history the prompts don't change at all.
+This changes what is sent to the model, and it only helps once the calendar holds some history. Without history the **user** messages don't change. Each **system** prompt always gains one sentence that starts with «Если передана история носки», so that sentence has no effect when no history is sent.
 
 ## Work items
 
@@ -24,8 +24,9 @@ This changes what is sent to the model. Do it only after the calendar has been u
 ## Tests
 
 1. With no history: the looks and capsule `user` messages are byte-identical to the T3 prompt fixtures. `system` differs only by the added sentence.
-2. With fixed calendar data and an injected `now`: the exact history block, including the 14-entry cap, newest first, and the "Давно не надевали" line appearing only when the oldest worn entry is 30 or more days old.
-3. A throwing contribution doesn't break prompt building.
+2. Update T3's prompt-builder tests: the expected `LOOKS_SYSTEM` and `CAPSULE_SYSTEM` strings gain exactly the new sentence; every other expected string stays unchanged. This is an allowed assertion change; note it in the PR.
+3. With fixed calendar data and an injected `now`: the exact history block, including the 14-entry cap, newest first, and the "Давно не надевали" line appearing only when the oldest worn entry is 30 or more days old.
+4. A throwing contribution doesn't break prompt building.
 
 ## Manual evaluation (required, report it in the PR)
 

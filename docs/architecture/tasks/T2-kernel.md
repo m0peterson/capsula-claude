@@ -1,6 +1,6 @@
 # T2. Kernel: module contract, registry, slice store, events, extension points
 
-|                       |                      |
+| -                     | -                    |
 | --------------------- | -------------------- |
 | Depends on            | nothing              |
 | Runs in parallel with | T1, T4               |
@@ -38,6 +38,8 @@ To stay independent of T1, files in `core/` written by this task import nothing 
 4. Calls each `init()` in order, after **all** slices are loaded.
 5. Returns `{ routes: [{ id, label, order, render }] }`, sorted by `order`.
 
+It never rejects because of storage: load failures fall back as described below. Also export `resetForTests()`, which calls the store's `resetForTests()`, `events.clear()` and `extensions.clear()`, so later tasks can call `start(modules)` more than once in one test file.
+
 T3 adds settings loading to this function. Leave a clear spot for it, not a TODO comment.
 
 ### `core/store.js`
@@ -54,26 +56,36 @@ async resetAll()
 exportBackup()               // → string, JSON.stringify(obj, null, 1)
 async importBackup(text)     // → { notes: { [key]: number } }
 useBackend(backend)          // tests and fallback
-memoryBackend(initial = {})  // → backend with a `writes` counter
+memoryBackend(initial = {})  // → backend with a `writes` counter; structuredClones values on write and on read, as IndexedDB does
 idbBackend()                 // IndexedDB "capsula" v1, object store "kv"
-resetForTests()              // forget all slices, dirty flags, timers and backend
+resetForTests()              // see below
+forgetSlicesForTests()       // T2's own tests only: drop every slice definition so fake ids can be reused
 ```
 
 Backend interface, so memory and IndexedDB behave the same:
 
 ```js
-{ async getMany(keys) /* → { [key]: value } for keys that exist */, async write({ put = {}, del = [] }) /* atomic */ }
+{
+  async getMany(keys), // → { [key]: value } for the keys that exist
+  async write({ put = {}, del = [], clear = false }), // atomic; clear empties the store first, in the same transaction
+}
 ```
 
-Details that matter:
+Details that matter (target.md sections 6.3 to 6.5 are the full rules):
 
-- `load` reads `mod:<id>` for every slice plus `state`. The legacy split runs only when **none** of the `mod:` keys exist and `state` is a plain object. It ends with one `write({ put: { ...allModKeys, "legacy:state": state }, del: ["state"] })`.
-- `migrate` receives `{ from, deps, note }`. `deps.get(id)` returns the loaded data of a slice in this entry's `requires` and throws for anything else. If `migrate` throws, warn with `console.warn` naming the slice and use `initial()`.
+- `load` reads `mod:<id>` for every slice, and `state` only when none of them exists. The legacy split runs only when **none** of the `mod:` keys exist and `state` is a plain object. Every `fromLegacy` gets the same single `structuredClone` of `state`. The split ends with one `write({ put: allModKeys })`; `state` is never modified or deleted by the split.
+- `migrate` receives `{ from, deps, note }`. `deps.get(id)` throws for an id outside this entry's `requires`. Otherwise it returns the data that slice will hold once this load or import finishes: at load, its migrated data; on import, the data computed from the file when the file provides that slice (v2: present in `slices`; v1: the slice has `fromLegacy`), otherwise the current data. Slices are computed in module order, so that data is ready in time.
+- If `fromLegacy` or `migrate` throws, warn with `console.warn` naming the slice and use `initial()`.
 - `fromLegacy` missing: the slice gets `initial()` on legacy split and is untouched on v1 import.
-- Default backend: `idbBackend()` when `typeof indexedDB !== "undefined"`. If opening fails or `indexedDB` is missing, warn `IndexedDB недоступен, данные не сохранятся` (today's message) and use `memoryBackend()`.
-- `save()` throttles at 50 ms (the first `save()` starts the timer, later ones don't push it back). A failed write logs `Не удалось сохранить` like today and keeps the slices dirty for the next flush.
-- `importBackup` error message for anything that isn't a backup: `Это не файл резервной копии Capsula`. A file is a backup if it is a JSON object with `version: 2` and a plain-object `slices`, or with a plain-object `state` (version 1).
-- `importBackup` and `resetAll` emit `app:data-replaced` through `core/events.js` after the write.
+- Default backend: `idbBackend()` when `typeof indexedDB !== "undefined"`. If opening fails, `indexedDB` is missing, or the first `getMany` rejects, warn `IndexedDB недоступен, данные не сохранятся` (today's message) and use `memoryBackend()` for the rest of the session. Never write to IndexedDB after a failed read.
+- If the split write rejects: warn, keep the migrated data, and keep **every** slice dirty, so the next flush retries all of them in one write.
+- `save()` marks the slice dirty and starts the 50 ms timer if none is pending, even when the slice is already dirty (throttle: later calls don't push the timer back).
+- `flush()` synchronously takes the dirty ids and clears the set, clones each slice's `{ v, data }` with a JSON round trip in the same tick, then awaits `backend.write`. If the write rejects, it logs `Не удалось сохранить` and adds those ids back to the dirty set. Dirty flags are never cleared after a write resolves.
+- `importBackup` error message for anything that isn't a backup: `Это не файл резервной копии Capsula`. A file is a version 2 backup if it is a JSON object with `version: 2` and a plain-object `slices`. Otherwise it is a version 1 backup if it is a JSON object with a plain-object `state`, **whatever its `version`** (today's importer doesn't check it).
+- `importBackup` computes every slice, swaps the data into memory, marks those slices dirty and writes all dirty slices in one write. `resetAll` sets every slice to `initial()` and writes `{ clear: true, put: <every mod: key with initial data> }`. Both emit `app:data-replaced` through `core/events.js` after the swap, whether or not the write succeeded. On a failed write they rethrow and leave the slices dirty; a failed `resetAll` also keeps the pending `clear` for the next flush.
+- `resetForTests()` resets every slice created so far to `initial()` and clears the dirty set, the timer, the pending clear and the backend. Slice objects stay valid: `defineSlice` runs once per process when a module's `model.js` is imported, and later tasks' tests reload the same real slices after a reset.
+
+`idbBackend` details: open the database once and reuse the connection. `getMany` uses one readonly transaction. `write` creates one readwrite transaction on `kv`, issues `clear`, every `put` and every `delete` synchronously with no `await` between them (otherwise the transaction auto-commits), resolves on `oncomplete`, and rejects with `tx.error` on **both** `onabort` and `onerror`. Chromium reports a full disk (`QuotaExceededError`) through `abort` only; a promise that listens only to `onerror`, as today's `idbSet` does, never settles.
 
 ### `core/events.js`
 
@@ -92,20 +104,25 @@ Test files must **not** stub `globalThis.addEventListener`, `document` or `index
 3. `init` runs in module order and sees loaded slice data.
 4. Fresh boot with an empty backend: every slice has `initial()` data and nothing is written until `save()`.
 5. Two `save()` calls on two slices in the same tick produce **one** backend write that contains both.
-6. Legacy split: a memory backend holding `state` produces the right data per slice (`from: 0`), and exactly one write that puts every `mod:` key and `legacy:state` and deletes `state`.
+6. Legacy split: a memory backend holding `state` produces the right data per slice (`from: 0`), and exactly one write that puts every `mod:` key. `state` afterwards deep-equals the original, even though a `migrate` mutates its input.
 7. No legacy split when at least one `mod:` key exists, even if `state` also exists.
-8. `deps.get` works for a required slice and throws for one not required. A throwing `migrate` falls back to `initial()` and warns.
+8. `deps.get` works for a required slice and throws for one not required. A throwing `migrate` and a throwing `fromLegacy` each fall back to `initial()` and warn. A `state` that is `null`, an array or a string is ignored, not split.
 9. The stored version reaches `migrate` as `from`.
 10. Export produces the version 2 shape. A round trip `importBackup(exportBackup())` leaves the data unchanged.
 11. Version 2 import: present slices replaced, absent slices untouched, unknown slice ids ignored, `note()` counters returned, one write, `app:data-replaced` emitted.
-12. Version 1 import goes through `fromLegacy`; a slice without `fromLegacy` stays untouched.
+12. Version 1 import goes through `fromLegacy`; a slice without `fromLegacy` stays untouched. A `{ state }` file with no `version` imports as version 1.
 13. Import rejects non-JSON, `{}` and `{"state":"строка"}` with the exact message.
-14. `resetAll` restores `initial()` everywhere, deletes `legacy:state`, writes once, emits `app:data-replaced`.
-15. A backend whose `write` rejects: warning logged, slices stay dirty, the next successful flush writes them.
-16. Events: a throwing listener doesn't block the next one; unsubscribe works.
-17. Extensions: duplicate id throws; ordering by `order`, then registration order.
+14. Import into an **empty** store (fresh boot) where slice `b` requires `a` and `b`'s `migrate` keeps only ids present in `deps.get("a")`: `b` keeps its references to `a`'s imported data, for both v1 and v2. With a v2 file that has `b` but not `a`, `b` sees `a`'s current data.
+15. `resetAll` on a backend holding `state`, a `mod:` key of a removed module and the current `mod:` keys: afterwards only the current `mod:` keys exist, holding `initial()` data; one write; `app:data-replaced` emitted.
+16. A backend whose `write` rejects: warning logged, slices stay dirty, the next successful flush writes them. `importBackup` with a rejecting write rejects, still emits `app:data-replaced`, and the next successful flush writes every imported slice in one write.
+17. A backend whose `write` resolves on demand: `save()` on a slice while its previous write is pending gets written by the next flush.
+18. The legacy-split write rejects: warning logged, slices hold the migrated data, `state` is intact, no `mod:` key exists, and the next successful flush writes **all** `mod:` keys in one write.
+19. The first `getMany` rejects: warning logged, every slice has `initial()` data, and later saves never reach the failing backend.
+20. A slice defined before `resetForTests()` loads and saves again after it.
+21. Events: a throwing listener doesn't block the next one; unsubscribe works.
+22. Extensions: duplicate id throws; ordering by `order`, then registration order.
 
-Use `resetForTests()`, `clear()` and fake timers or a short `await` between tests. Don't let one test's slices leak into the next.
+Use `resetForTests()`, `forgetSlicesForTests()`, `clear()` and fake timers or a short `await` between tests. Don't let one test's slices leak into the next.
 
 ## Acceptance criteria
 

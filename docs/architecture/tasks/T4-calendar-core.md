@@ -1,6 +1,6 @@
 # T4. Calendar core: dates, look snapshots, calendar domain logic
 
-|                       |                                    |
+| -                     | -                                  |
 | --------------------- | ---------------------------------- |
 | Depends on            | T1 merged                          |
 | Runs in parallel with | T2, T3                             |
@@ -40,7 +40,7 @@ No globals stubbed. At minimum:
 ### Dates
 
 1. `todayISO` uses local date parts. With `TZ=Europe/Moscow` set for the test process, `new Date("2026-10-06T22:30:00Z")` gives `2026-10-07`. If setting `TZ` inside the test is unreliable, build `now` from local parts with `new Date(2026, 9, 7, 0, 30)` and assert on that.
-2. `isISODate`: accepts `2024-02-29`, rejects `2026-02-29`, `2026-13-01`, `2026-1-01`, `2026-01-01T00:00`, `1899-12-31`, non-strings.
+2. `isISODate`: accepts `2024-02-29`, rejects `2026-02-29`, `2026-13-01`, `2026-1-01`, `2026-01-01T00:00`, `1899-12-31`, `2101-01-01`, non-strings. `isISOMonth`: accepts `2026-10`, `1900-01`, `2100-12`; rejects `2026-13`, `2026-00`, `2026-1`, `0050-03` (`Date.UTC` would map year 50 to 1950), `2101-01`, non-strings.
 3. `addDays` across month and year ends and a leap day. `addMonths` across a year end.
 4. `monthGrid("2026-10")`: the first cell is Monday `2026-09-28`, there are 5 weeks, every week has 7 cells, `inMonth` is right. `monthGrid("2026-02")`: 5 weeks, the first cell is `2026-01-26` (1 February 2026 is a Sunday). `monthGrid("2027-02")`: exactly 4 weeks (starts on a Monday, 28 days). `monthGrid("2026-08")`: 6 weeks, the last cell is `2026-09-06`.
 5. `formatDay("2026-10-07") === "7 октября"`, `formatDayLong` ends with `, среда`, `formatMonth("2026-10") === "Октябрь 2026"`.

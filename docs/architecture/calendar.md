@@ -28,7 +28,7 @@ AI planning ("plan my week"), weather, reminders and notifications, recurring en
 
 Looks have no ids and the whole list is replaced every time looks are regenerated. Capsule looks are replaced when the capsule is rebuilt. Wardrobe items can be deleted. A calendar is history: what was worn on 12 September must not change because the looks were regenerated on 1 October.
 
-So each entry copies the look at the moment it is planned: name, occasion, description, and for every item its wardrobe id (if owned), name, category and color. **Images are not copied.** A wardrobe photo is a JPEG data URL of tens of kilobytes, and copying it into every entry would grow IndexedDB and backup files without limit.
+So each entry copies the look at the moment it is planned: name, occasion, description, and for every item its wardrobe id (if owned), name, category, color and `color_hex`. `color_hex` matters: grid markers and placeholders are painted with it. **Images are not copied.** A wardrobe photo is a JPEG data URL of tens of kilobytes, and copying it into every entry would grow IndexedDB and backup files without limit.
 
 Rendering rule for an item in an entry:
 
@@ -94,7 +94,7 @@ Dates are local calendar dates stored as `"YYYY-MM-DD"` strings. Never timestamp
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `todayISO(now = new Date())` | local date of `now`                                                                                              |
 | `isISODate(s)`               | strict `YYYY-MM-DD`, real day (rejects `2026-02-30`), year 1900 to 2100                                          |
-| `isISOMonth(s)`              | strict `YYYY-MM`                                                                                                 |
+| `isISOMonth(s)`              | strict `YYYY-MM`, month 01 to 12, year 1900 to 2100 (same range as `isISODate`)                                  |
 | `monthOf(iso)`               | `"YYYY-MM"`                                                                                                      |
 | `addDays(iso, n)`            | arithmetic with `Date.UTC` on parsed parts, so DST never shifts a day                                            |
 | `addMonths(ym, n)`           | `"YYYY-MM"`                                                                                                      |
@@ -152,10 +152,10 @@ Read-only. Nothing in v1 requires `calendar`, so this API exists for T6 and futu
 
 Snapshot builders live with the module that knows the source format:
 
-- `looks/model.js` `toSnapshot(look, wardrobeById)`: items from `item_ids` that still exist, `ref` = id, `toBuy: false`, `source: "looks"`.
-- `capsule/model.js` `toSnapshot(capsuleLook, wardrobeById, buyById)`: refs found in `buy` become `{ ref: null, toBuy: true }` with the purchase's name, category and color; refs found in the wardrobe become `{ ref: id, toBuy: false }`; unknown refs are skipped. `source: "capsule"`.
+- `looks/model.js` `toSnapshot(look, wardrobeById)`: items from `item_ids` that still exist, each `{ ref: id, name, category, color, color_hex, toBuy: false }` taken from the wardrobe item; `source: "looks"`.
+- `capsule/model.js` `toSnapshot(capsuleLook, wardrobeById, buyById)`: refs found in `buy` become `{ ref: null, toBuy: true }` with the purchase's name, category, color and `color_hex`; refs found in the wardrobe become `{ ref: id, toBuy: false }`; unknown refs are skipped. `source: "capsule"`.
 
-Both pass the result through `normalizeSnapshot`. If it returns `null` (no items left), the action shows the toast `В образе не осталось вещей` and does nothing.
+Both pass the result through `normalizeSnapshot`, so `toSnapshot` may return `null` (for example, a capsule look whose wardrobe items were all deleted; capsule refs are never pruned). `bindActions` passes `null` through unchanged, and the calendar's `run` handles it: it calls `toast("В образе не осталось вещей", "error")` and opens no dialog.
 
 Calendar does not listen to `wardrobe:item-removed` or `capsule:rebuilt`. Snapshots make that unnecessary.
 
@@ -163,14 +163,16 @@ Calendar does not listen to `wardrobe:item-removed` or `capsule:rebuilt`. Snapsh
 
 ### Route
 
-| Hash                   | Shows                                                                  |
-| ---------------------- | ---------------------------------------------------------------------- |
-| `#calendar`            | current month, today selected                                          |
-| `#calendar/2026-10`    | that month; today selected if it falls in the month, otherwise the 1st |
-| `#calendar/2026-10-07` | that month, that day selected                                          |
-| anything invalid       | same as `#calendar`                                                    |
+| Hash                                                             | Shows                                                                  |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `#calendar`                                                      | current month, today selected                                          |
+| `#calendar/2026-10`                                              | that month; today selected if it falls in the month, otherwise the 1st |
+| `#calendar/2026-10-07`                                           | that month, that day selected                                          |
+| anything invalid (including a month or day outside 1900 to 2100) | same as `#calendar`                                                    |
 
-Month navigation and day selection re-render the view in place and update the URL with `history.replaceState(null, "", "#calendar/<date>")`. They must not set `location.hash`: that fires `hashchange`, and the shell then scrolls to the top on every click.
+Month navigation and day selection re-render the view in place and update the URL with `history.replaceState(null, "", "#calendar/<date>")`. They must not set `location.hash`: that fires `hashchange`, and the shell then scrolls to the top on every click. The `‹` and `›` buttons are disabled at `1900-01` and `2100-12`.
+
+The view never adds listeners to `root` itself. The shell reuses one `<main>` element for every route, so a listener on it survives tab switches and piles up with every in-place re-render. Listeners go on the child elements the render creates.
 
 ### Layout (top to bottom)
 
@@ -179,9 +181,9 @@ Month navigation and day selection re-render the view in place and update the UR
 3. **Card "Не отмечены"**, only when `unconfirmed()` is not empty: each entry with `Надет` and `Не надет` buttons.
 4. **Card "Ближайшие 14 дней"**: compact list of date, look name and status. Empty: `Ничего не запланировано`.
 
-Markers: a dot colored with the `color_hex` of the entry's first item that has one, falling back to `var(--muted)`. `worn` is a filled dot, `planned` a ring, `unconfirmed` a ring in the warning color, `skipped` a small muted dot. Status also appears as text in the day panel, because color alone is not accessible.
+Markers: a dot colored with the `color_hex` of the entry's first item that has one, falling back to `var(--muted)`. `worn` is a filled dot, `planned` a ring, `unconfirmed` a ring in `var(--no)` (the only foreground warning color; `--warn-bg` is a pale background and would be invisible), `skipped` a small muted dot. Status also appears as text in the day panel, because color alone is not accessible.
 
-The grid must fit 7 columns at 343 px content width (phone with 16 px gutters) without horizontal scroll. Cells show only the day number and markers.
+The grid sits inside a `.card` (14 px padding at widths ≤ 520 px, 1 px border, inside the 16 px page gutters), so at a 375 px viewport it has 313 px, about 44 px per column. Use `grid-template-columns: repeat(7, minmax(0, 1fr))` and give `.cal-day` `padding: 4px 0; min-width: 0` to override the global `button` padding (`9px 16px`), which would otherwise force the grid wider than the screen. Cells show only the day number and markers. No horizontal scroll at 375 px.
 
 ### Entry card
 
@@ -196,13 +198,14 @@ Name and occasion, a status chip (`Запланирован`, `Надет`, `Н�
 
 A native `<dialog>` appended to `document.body`, opened with `showModal()`, removed on close. Escape closes it (native behavior). Focus returns to the element that opened it.
 
-- **Pick step** (only when opened from `Добавить образ`): one section per `look.sources` contribution, listing its snapshots as compact cards with `Выбрать`, plus a `Собрать из гардероба` section: a grid of wardrobe items with checkboxes, a name field (default `Образ`) and at least one item. With no sources and an empty wardrobe it shows: `Сохранённых образов пока нет. Составьте их во вкладке «Образы» или соберите образ из вещей гардероба.`
+- **Pick step** (only when opened from `Добавить образ`): one section per `look.sources` contribution, listing its snapshots as compact cards with `Выбрать`, plus a `Собрать из гардероба` section: a grid of wardrobe items with checkboxes, a name field (default `Образ`) and at least one item. A source whose `list()` is empty is not shown, and neither is the compose section when the wardrobe is empty. When nothing is left to show, the pick step shows only: `Пока не из чего выбрать: нет ни сохранённых образов, ни вещей. Добавьте вещи во вкладке «Гардероб».`
+- Calls: `openPlanDialog({ snapshot, date? })` opens the form step; `openPlanDialog({ pick: true, date })` opens the pick step. Never call it with a `null` snapshot (see section 6).
 - **Form step**: the look name and items (read-only), `Дата` (`<input type="date">`, defaulting to the selected day or today), `Повод` (prefilled from the snapshot), `Заметка`, and an `Уже надет` checkbox shown only when the date is today. Buttons `Сохранить` and `Отмена`.
 - On save: `plan()`, the toast `Образ добавлен в календарь: <formatDay(date)>`, and if the calendar route is open, its view re-renders.
 
 ### Styles
 
-A `/* Календарь */` section at the end of `public/styles.css`. Every class is prefixed `cal-`. Use the existing tokens (`--line`, `--soft`, `--accent`, `--muted`, `--warn-bg`, `--radius`) so dark mode works with no extra rules.
+A `/* Календарь */` section at the end of `public/styles.css`. Every class is prefixed `cal-`. Use the existing tokens (`--line`, `--soft`, `--accent`, `--muted`, `--no`, `--warn-bg`, `--radius`) so dark mode works with no extra rules.
 
 ## 8. Edge cases
 
