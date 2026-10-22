@@ -11,6 +11,9 @@ export const MAX_OUTFIT_PHOTOS = 10;
 // Сколько имеющихся вещей показываем модели для сверки: две таблицы по 36 миниатюр.
 const MAX_KNOWN = 72;
 const SHEET = { tile: 160, cols: 6, per: 36 };
+// Сервер принимает тело до 5.5 МБ. Детальные фото с телефона даже в 1024 px бывают по 450 КБ в base64,
+// десять таких с таблицами не влезают: тогда пережимаем фото мельче, а не показываем ошибку «слишком большой запрос».
+const BODY_BUDGET = 4.6 * 1024 * 1024;
 
 // Имеющиеся вещи для сверки: текстом с метками E1, E2, ... и таблицами миниатюр с теми же метками.
 async function knownWardrobe() {
@@ -40,6 +43,18 @@ export async function importOutfits(files, { signal, onProgress, setLabel }) {
     }
   }
   const { list, known, sheets } = await knownWardrobe();
+  const size = () => [...photos, ...sheets].reduce((n, u) => n + u.length, 0);
+  if (size() > BODY_BUDGET) {
+    for (let i = 0; i < photos.length; i++) {
+      const b = await createImageBitmap(sources[i]);
+      try {
+        photos[i] = bitmapToDataUrl(b, 896, 0.7);
+      } finally {
+        b.close?.();
+      }
+    }
+  }
+  if (size() > BODY_BUDGET) throw new Error("Фото слишком тяжёлые для одного захода. Загрузите меньше фото за раз.");
 
   setLabel(`Ищу вещи на ${photos.length} фото`);
   const r = await runServerTask("outfits", { photos, known, sheets }, { signal, onProgress });
