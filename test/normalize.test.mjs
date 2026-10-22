@@ -1,17 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-globalThis.addEventListener = () => {};
-globalThis.document = { visibilityState: "visible" };
+import * as coerce from "../public/js/lib/coerce.js";
+import { normalizeAnalysis } from "../public/js/modules/profile/schema.js";
+import { normalizeItem, recognizedItems } from "../public/js/modules/wardrobe/schema.js";
+import { normalizeLooks } from "../public/js/modules/looks/schema.js";
+import { normalizeCapsule } from "../public/js/modules/capsule/schema.js";
+import { normalizeSearch } from "../public/js/modules/search/schema.js";
+import * as P from "../server/modules/profile.mjs";
+import { wardrobeBrief } from "../server/modules/wardrobe.mjs";
+import { swatches, safeHtml } from "../public/js/ui/components.js";
+import { safeHex, safeImage } from "../public/js/lib/html.js";
+import { importBackup } from "../public/js/core/store.js";
+import { migrateLegacy } from "./helpers.mjs";
 
-const N = await import("../public/js/normalize.js");
-const { migrate, defaultState } = await import("../public/js/store.js");
-const P = await import("../lib/prompts.mjs");
-const { wardrobeBrief } = P;
+// Нормализаторы раньше жили в одном файле normalize.js, теперь каждый в schema.js своего модуля.
+const N = { ...coerce, normalizeAnalysis, normalizeItem, recognizedItems, normalizeLooks, normalizeCapsule, normalizeSearch };
 // Тесты писались, когда profileBrief принимал всё состояние. Теперь он на сервере и принимает только профиль.
 const profileBrief = (st) => P.profileBrief(st.profile);
-const { swatches, safeHtml } = await import("../public/js/ui.js");
-const { safeHex } = await import("../public/js/util.js");
 
 const goodAnalysis = {
   color_type: { season: "Мягкое лето", undertone: "холодный", best_colors: [{ name: "Роза", hex: "#c9929c" }] },
@@ -220,9 +226,8 @@ test("safeHtml: исключение при показе превращаетс�
   );
 });
 
-test("миграция: сохранённое в кривой форме приводится к нынешней, неисправимое сбрасывается", () => {
-  const st = {
-    ...defaultState(),
+test("миграция: сохранённое в кривой форме приводится к нынешней, неисправимое сбрасывается", async () => {
+  const st = await migrateLegacy({
     wardrobe: [{ id: "w1", name: "A" }, null, "x", { id: "w2", name: "B" }],
     profile: {
       photos: ["data:image/png;base64,iVBORw0KGgo=", 5, null],
@@ -232,27 +237,24 @@ test("миграция: сохранённое в кривой форме при
     looks: [{ name: "L", item_ids: ["w1", "w2", "gone"] }, null, { name: "bad", item_ids: ["gone"] }],
     capsule: { buy: [null, { name: "Рубашка" }], keep: [{ id: "w1" }, { id: "gone" }] },
     search: { a: { results: [null, { title: "t", url: "https://x.y" }] }, b: "мусор", c: null },
-  };
-  migrate(st);
-  assert.equal(st.wardrobe.length, 2);
+  });
+  assert.equal(st.wardrobe.items.length, 2);
   assert.deepEqual(st.profile.photos, ["data:image/png;base64,iVBORw0KGgo="]);
   assert.deepEqual(st.profile.inputs, {});
   assert.deepEqual(st.profile.analysis.body.goals, ["a", "b"]);
-  assert.equal(st.looks.length, 1);
-  assert.deepEqual(st.capsule.keep, [{ id: "w1", role: "", reason: "" }]);
-  assert.equal(st.capsule.buy[0].id, "b1");
-  assert.deepEqual(Object.keys(st.search), ["a"]);
+  assert.equal(st.looks.list.length, 1);
+  assert.deepEqual(st.capsule.result.keep, [{ id: "w1", role: "", reason: "" }]);
+  assert.equal(st.capsule.result.buy[0].id, "b1");
+  assert.deepEqual(Object.keys(st.search.cache), ["a"]);
 
-  const broken = {
-    ...defaultState(),
+  const broken = await migrateLegacy({
     profile: { photos: [], inputs: {}, analysis: { color_type: {}, body: {} } },
     capsule: { concept: "x" },
     looks: "мусор",
-  };
-  migrate(broken);
+  });
   assert.equal(broken.profile.analysis, null);
-  assert.equal(broken.capsule, null);
-  assert.deepEqual(broken.looks, []);
+  assert.equal(broken.capsule.result, null);
+  assert.deepEqual(broken.looks.list, []);
 });
 
 test("аналитический результат нормализуется идемпотентно", () => {
@@ -311,7 +313,6 @@ test("аналогично для покупок капсулы", () => {
 });
 
 test("картинки: только data URL растровых форматов", async () => {
-  const { safeImage } = await import("../public/js/util.js");
   const ok = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
   assert.equal(safeImage(ok), ok);
   for (const bad of [
@@ -328,43 +329,31 @@ test("картинки: только data URL растровых формато�
   }
 });
 
-test("миграция чистит чужие картинки и id вещей", () => {
+test("миграция чистит чужие картинки и id вещей", async () => {
   const ok = "data:image/png;base64,iVBORw0KGgo=";
-  const st = {
-    ...defaultState(),
+  const st = await migrateLegacy({
     wardrobe: [
       { id: "w1", name: "A", image: 'x" onerror="alert(1)' },
       { id: "w2", name: "B", image: ok },
     ],
     profile: { photos: [ok, "javascript:alert(1)"], inputs: {}, analysis: null },
-  };
-  migrate(st);
-  assert.equal(st.wardrobe[0].image, "");
-  assert.equal(st.wardrobe[1].image, ok);
+  });
+  assert.equal(st.wardrobe.items[0].image, "");
+  assert.equal(st.wardrobe.items[1].image, ok);
   assert.deepEqual(st.profile.photos, [ok]);
 });
 
-test("importData проходит миграцию и отклоняет не-копии", async () => {
-  const { importData, state } = await import("../public/js/store.js");
-  globalThis.indexedDB = undefined;
-  await assert.rejects(importData("{}"), /не файл резервной копии/);
-  await assert.rejects(importData('{"state":"строка"}'), /не файл резервной копии/);
+test("импорт копии проходит миграцию и отклоняет не-копии", async () => {
+  await assert.rejects(importBackup("{}"), /не файл резервной копии/);
+  await assert.rejects(importBackup('{"state":"строка"}'), /не файл резервной копии/);
   const ok = "data:image/png;base64,iVBORw0KGgo=";
-  const backup = JSON.stringify({
-    version: 1,
-    state: {
-      wardrobe: [{ id: "w1", name: "A", image: "bad" }],
-      profile: { photos: [ok, "bad"], inputs: {}, analysis: { color_type: { season: "Лето", best_colors: "x" }, body: { goals: "a;b" } } },
-    },
+  const st = await migrateLegacy({
+    wardrobe: [{ id: "w1", name: "A", image: "bad" }],
+    profile: { photos: [ok, "bad"], inputs: {}, analysis: { color_type: { season: "Лето", best_colors: "x" }, body: { goals: "a;b" } } },
   });
-  try {
-    await importData(backup);
-  } catch (e) {
-    if (!/indexedDB|IDB|open/i.test(String(e))) throw e; // в node нет IndexedDB: проверяем состояние, а не запись
-  }
-  assert.equal(state.wardrobe[0].image, "");
-  assert.deepEqual(state.profile.photos, [ok]);
-  assert.deepEqual(state.profile.analysis.body.goals, ["a", "b"]);
+  assert.equal(st.wardrobe.items[0].image, "");
+  assert.deepEqual(st.profile.photos, [ok]);
+  assert.deepEqual(st.profile.analysis.body.goals, ["a", "b"]);
 });
 
 // --- Регрессии третьего раунда ревью --------------------------------------------------------------------
@@ -380,24 +369,15 @@ test("text(): предложения склеиваются пробелом, о
 });
 
 test("картинки: jpg принимается, миграция и импорт сообщают, сколько отброшено", async () => {
-  const { safeImage } = await import("../public/js/util.js");
   assert.equal(safeImage("data:image/jpg;base64,/9j/4AAQ"), "data:image/jpg;base64,/9j/4AAQ");
-  const st = {
-    ...defaultState(),
+  const st = await migrateLegacy({
     wardrobe: [
       { id: "w1", image: "javascript:x" },
       { id: "w2", image: "data:image/png;base64,AAAA" },
     ],
     profile: { photos: ["bad", "data:image/png;base64,AAAA"], inputs: {}, analysis: null },
-  };
-  assert.deepEqual(migrate(st), { droppedImages: 2 });
-  const { importData } = await import("../public/js/store.js");
-  globalThis.indexedDB = undefined;
-  let res;
-  try {
-    res = await importData(JSON.stringify({ state: { wardrobe: [{ id: "w1", image: "bad" }] } }));
-  } catch (e) {
-    assert.match(String(e), /open|indexedDB/i);
-  }
-  assert.ok(res === undefined || res.droppedImages === 1);
+  });
+  assert.deepEqual(st.notes, { droppedImages: 2 });
+  const one = await migrateLegacy({ wardrobe: [{ id: "w1", image: "bad" }] });
+  assert.equal(one.notes.droppedImages, 1);
 });

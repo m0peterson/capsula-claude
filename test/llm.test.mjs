@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { chat, chatJson, resetLearned, setRetryDelay } = await import("../lib/llm.mjs");
+const { chat, chatJson, resetLearned, setRetryDelay } = await import("../server/llm.mjs");
 setRetryDelay(1);
 
 const endpoint = { provider: "openrouter", key: "sk-test" };
