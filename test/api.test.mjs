@@ -404,6 +404,34 @@ test(
 );
 
 test(
+  "OpenRouter по умолчанию: быстрые провайдеры без хранения данных, запасная модель; образы без рассуждений",
+  run(async () => {
+    const m = mockFetch(() => sseOf(JSON.stringify({ looks: [{ name: "a", item_ids: ["w1", "w2"] }] })));
+    try {
+      const wardrobe = [
+        { id: "w1", name: "a" },
+        { id: "w2", name: "b" },
+      ];
+      await resultOf(await handleApi(req("/api/task", { task: "looks", input: { wardrobe } }), env({ OPENROUTER_API_KEY: "k" })));
+      const b = m.calls[0].body;
+      assert.deepEqual(b.provider, { data_collection: "deny", sort: "throughput" });
+      assert.deepEqual(b.models, ["deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"]);
+      assert.deepEqual(b.reasoning, { effort: "none" });
+      await resultOf(
+        await handleApi(
+          req("/api/task", { task: "looks", input: { wardrobe } }),
+          env({ OPENROUTER_API_KEY: "k", OPENROUTER_SORT: "price", MODEL_FALLBACK: "" }),
+        ),
+      );
+      assert.deepEqual(m.calls[1].body.provider, { data_collection: "deny", sort: "price" });
+      assert.equal(m.calls[1].body.models, undefined);
+    } finally {
+      m.restore();
+    }
+  }),
+);
+
+test(
   "модель и провайдер задаются переменными окружения",
   run(async () => {
     const m = mockFetch(() => sseOf(JSON.stringify(ANALYSIS)));

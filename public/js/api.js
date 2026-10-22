@@ -49,7 +49,18 @@ async function apiError(res) {
 
 // Выполняет задачу на сервере. Ответ идёт потоком событий: progress, затем result или error.
 // Возвращает { data, locked, sealed, plan }.
-export async function runServerTask(task, input, { sealed, signal, onProgress } = {}) {
+// Если соединение оборвалось без результата (на Netlify функцию обрывают через 30 секунд), повторяем один раз:
+// обычно второй ответ модели приходит быстрее.
+export async function runServerTask(task, input, opts = {}) {
+  try {
+    return await runOnce(task, input, opts);
+  } catch (e) {
+    if (!e.cut || opts.signal?.aborted) throw e;
+    return runOnce(task, input, opts);
+  }
+}
+
+async function runOnce(task, input, { sealed, signal, onProgress } = {}) {
   const body = { task, input };
   if (sealed) body.sealed = sealed;
   if (settings.devCode) body.dev = settings.dev;
@@ -103,6 +114,7 @@ export async function runServerTask(task, input, { sealed, signal, onProgress } 
   if (!outcome) {
     const err = new Error("Соединение с сервером оборвалось до конца ответа. Попробуйте ещё раз.");
     err.truncated = true;
+    err.cut = true;
     throw err;
   }
   if (!outcome.ok) {

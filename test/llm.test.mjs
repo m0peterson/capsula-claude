@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { chat, chatJson, resetLearned } = await import("../lib/llm.mjs");
+const { chat, chatJson, resetLearned, setRetryDelay } = await import("../lib/llm.mjs");
+setRetryDelay(1);
 
 const endpoint = { provider: "openrouter", key: "sk-test" };
 const slot = () => ({ model: "m/x", effort: "xhigh", maxTokens: 16000 });
@@ -380,15 +381,17 @@ test(
 test(
   "неверная догадка не запоминается: если повтор тоже упал, следующий вызов шлёт всё заново",
   run(async () => {
+    // 500 повторяется один раз как временная ошибка, поэтому в сценарии два сбоя подряд.
     const m = mockFetch(
       errorResponse(400, "Unsupported value: something not supported"),
+      errorResponse(500, "upstream down"),
       errorResponse(500, "upstream down"),
       jsonStream({ a: 1 }),
     );
     await assert.rejects(ask(), /upstream down/);
     await ask();
-    assert.equal(m.bodies.length, 3);
-    assert.deepEqual(m.bodies[2].reasoning, { effort: "xhigh" }, "отказ от reasoning не закрепился");
+    assert.equal(m.bodies.length, 4);
+    assert.deepEqual(m.bodies[3].reasoning, { effort: "xhigh" }, "отказ от reasoning не закрепился");
   }),
 );
 
@@ -561,7 +564,7 @@ test(
     assert.equal(b.temperature, 0);
     assert.equal(m.calls[0].url, "https://openrouter.ai/api/v1/chat/completions");
     assert.equal(m.calls[0].init.headers.authorization, "Bearer sk-test");
-    assert.equal(m.calls[0].init.redirect, "error");
+    assert.equal(m.calls[0].init.redirect, "manual");
   }),
 );
 
@@ -609,5 +612,38 @@ test(
     await assert.rejects(chatJson({ endpoint: { provider: "openrouter", key: "" }, slot: slot(), system: "s", user: "u" }), /ключ/);
     await assert.rejects(chatJson({ endpoint, slot: { ...slot(), model: " " }, system: "s", user: "u" }), /модель/);
     assert.equal(m.bodies.length, 0);
+  }),
+);
+
+test(
+  "редирект провайдера не выполняется и даёт ошибку",
+  run(async () => {
+    const m = mockFetch(new Response(null, { status: 302, headers: { location: "https://evil.example/" } }));
+    await assert.rejects(ask(), /перенаправлением \(302\)/);
+    assert.equal(m.bodies.length, 1);
+  }),
+);
+
+test(
+  "временная ошибка провайдера (429, 5xx, Cloudflare 1015, сеть): один повтор, вторая ошибка уходит пользователю",
+  run(async () => {
+    for (const first of [
+      errorResponse(429, "Rate limited"),
+      errorResponse(503, "busy"),
+      new Response("error code: 1015", { status: 403 }),
+    ]) {
+      const m = mockFetch(first, jsonStream({ a: 1 }));
+      assert.deepEqual((await ask()).data, { a: 1 });
+      assert.equal(m.bodies.length, 2);
+    }
+    let n = 0;
+    globalThis.fetch = async () => {
+      if (n++ === 0) throw new TypeError("fetch failed");
+      return jsonStream({ b: 2 });
+    };
+    assert.deepEqual((await ask()).data, { b: 2 });
+    const m = mockFetch(errorResponse(502, "bad gateway"), errorResponse(502, "still bad"));
+    await assert.rejects(ask(), /still bad/);
+    assert.equal(m.bodies.length, 2, "не больше одного повтора");
   }),
 );

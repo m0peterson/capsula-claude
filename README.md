@@ -46,7 +46,8 @@
 | `LLM_PROVIDER`                 | `openrouter` или `opencode-go`; по умолчанию тот, чей ключ задан                                                                            |
 | `MODEL_VISION`, `MODEL_TEXT`   | модели для фото и для текста; по умолчанию `deepseek/deepseek-v4.1-flash`                                                                   |
 | `MODEL_FALLBACK`               | запасная модель OpenRouter, по умолчанию `openai/gpt-6-luna`; пустая строка отключает                                                       |
-| `EFFORT_VISION`, `EFFORT_TEXT` | effort рассуждений, по умолчанию `low`                                                                                                      |
+| `EFFORT_VISION`, `EFFORT_TEXT` | effort рассуждений; по умолчанию `low` для фото и `none` для образов, капсулы и поиска                                                      |
+| `OPENROUTER_SORT`              | как OpenRouter выбирает провайдера модели: `throughput` (по умолчанию), `latency` или `price`                                               |
 | `MAX_TOKENS`                   | потолок ответа вместе с рассуждениями, по умолчанию 24000; 0 значит не передавать                                                           |
 | `PRO_SECRET`                   | включает платный доступ; ключ подписи токенов и шифрования конвертов. Не меняйте без нужды: старые токены и конверты перестанут открываться |
 | `PRO_CODES`                    | коды Pro через запятую, `КОД` или `КОД:дней` (по умолчанию 30 дней)                                                                         |
@@ -96,6 +97,8 @@ npx wrangler secret put OPENROUTER_API_KEY   # и остальные перем�
 Настройки в `wrangler.jsonc`: статика из `public/`, `/api/*` идёт в `worker/index.mjs`.
 
 ### Netlify
+
+Netlify обрывает функцию примерно через 30 секунд, и стриминг этот срок не продлевает (замерено в октябре 2026 на бесплатном плане: обрывы на 30.6 и 31.1 с). Обычно задачи укладываются в 10-20 секунд, но редкий медленный ответ провайдера обрывается. Клиент в этом случае один раз повторяет задачу сам. Для продакшена надёжнее Cloudflare Workers.
 
 1. Репозиторий в Netlify: _Add new site → Import from Git_. Настройки подтянутся из `netlify.toml` (publish `public`, функции `netlify/functions`).
 2. _Site configuration → Environment variables_: переменные из таблицы выше.
