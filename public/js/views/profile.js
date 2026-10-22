@@ -1,10 +1,10 @@
-import { state, settings, save } from "../store.js";
-import { chatJson, slotProblem } from "../llm.js";
-import { ANALYSIS_SYSTEM } from "../prompts.js";
+import { state, save } from "../store.js";
+import { runServerTask } from "../api.js";
 import { esc, arr, fileToDataUrl } from "../util.js";
 import { runTask, swatches, toast, readImages, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
 import { safeImage } from "../util.js";
 import { normalizeAnalysis } from "../normalize.js";
+import { lockedBlock, lockedNote, proCard, count } from "../pro.js";
 
 const MAX_PHOTOS = 3;
 
@@ -26,25 +26,48 @@ function fieldHtml([key, label, type, options, placeholder]) {
   return `<label class="field"><span>${label}</span>${input}</label>`;
 }
 
-export function renderAnalysis(a) {
+// Что именно скрыто, словами: в карточке Pro обещаем только то, что действительно есть в полном разборе.
+function lockedList(L) {
+  const parts = [
+    (L.best_colors || L.neutrals || L.avoid_colors || L.metals) && "вся палитра с нейтралями и металлами",
+    L.body && "пропорции и что балансировать",
+    L.silhouettes && "силуэты по зонам",
+    L.styles && "ещё стили",
+    L.fabrics_prints && "ткани и принты",
+    L.summary && "итог стилиста",
+  ].filter(Boolean);
+  const text = parts.join(", ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+// lock: что скрыто в бесплатном плане (null, если результат полный).
+export function renderAnalysis(a, lock = null) {
   if (!a) return "";
   const c = a.color_type || {};
   const b = a.body || {};
+  const L = lock || {};
   const conf = { low: "низкая", medium: "средняя", high: "высокая" };
+  const colorsSection = (title, list, hidden, what) =>
+    hidden ? lockedBlock(title, what, "swatches") : arr(list).length ? `<h3>${title}</h3>${swatches(list)}` : "";
   return `
   <section class="card">
     <h2>Цветотип: ${esc(c.season || "не определён")}</h2>
+    ${c.neighbor_season ? `<p class="meta">Рядом: ${esc(c.neighbor_season)}. Внешность на границе двух сезонов встречается часто, цвета обоих вам подойдут лучше остальных.</p>` : ""}
     <p class="meta">Подтон: ${esc(c.undertone)} · Контраст: ${esc(c.contrast)} · Уверенность: ${esc(conf[c.confidence] || c.confidence)}</p>
     <p>${esc(c.reasoning)}</p>
     <h3>Ваши цвета</h3>${swatches(c.best_colors)}
-    <h3>Нейтральная база</h3>${swatches(c.neutrals)}
-    <h3>Лучше избегать</h3>${swatches(c.avoid_colors)}
-    <p><strong>Металлы и фурнитура:</strong> ${esc(c.metals)}</p>
+    ${L.best_colors ? lockedNote(`Ещё ${count(L.best_colors, "цвет", "цвета", "цветов")} в Pro`) : ""}
+    ${colorsSection("Нейтральная база", c.neutrals, L.neutrals, "Нейтральная база в Pro")}
+    ${colorsSection("Лучше избегать", c.avoid_colors, L.avoid_colors, "Какие цвета вам не идут, в Pro")}
+    ${L.metals ? lockedNote("Металлы и фурнитура в Pro") : c.metals ? `<p><strong>Металлы и фурнитура:</strong> ${esc(c.metals)}</p>` : ""}
   </section>
   <section class="card">
     <h2>Фигура и пропорции</h2>
     <p class="meta">${esc(b.figure_type)} · ${esc(b.height_category)}${b.height_cm ? ` · ${esc(b.height_cm)} см` : ""} · Уверенность: ${esc(conf[b.confidence] || b.confidence)}</p>
-    <p>${esc(b.proportions)}</p>
+    ${
+      L.body
+        ? lockedBlock("", "Пропорции и что балансировать, в Pro")
+        : `<p>${esc(b.proportions)}</p>
     ${
       arr(b.goals).length
         ? `<h3>Что балансируем</h3><ul>${arr(b.goals)
@@ -52,13 +75,16 @@ export function renderAnalysis(a) {
             .join("")}</ul>`
         : ""
     }
-    ${b.notes ? `<p class="muted">${esc(b.notes)}</p>` : ""}
+    ${b.notes ? `<p class="muted">${esc(b.notes)}</p>` : ""}`
+    }
+    ${b.confidence === "low" && !b.notes ? `<p class="hint">Для точного анализа фигуры добавьте фото в полный рост в облегающей одежде и запустите анализ снова.</p>` : ""}
   </section>
   <section class="card">
     <h2>Подходящие стили</h2>
     <div class="cols">${arr(a.styles)
       .map((s) => `<div class="mini"><h3>${esc(s.name)}</h3><p>${esc(s.description)}</p><p class="muted">${esc(s.why)}</p></div>`)
       .join("")}</div>
+    ${L.styles ? lockedNote(`Ещё ${count(L.styles, "стиль", "стиля", "стилей")} в Pro`) : ""}
   </section>
   <section class="card">
     <h2>Силуэты одежды</h2>
@@ -69,9 +95,11 @@ export function renderAnalysis(a) {
           <p><span class="tag no">Нет</span> ${esc(s.avoid)}</p></div>`,
       )
       .join("")}
-    ${a.fabrics_prints ? `<h3>Ткани и принты</h3><p>${esc(a.fabrics_prints)}</p>` : ""}
+    ${L.silhouettes ? lockedBlock("", `Силуэты по ${count(L.silhouettes, "зоне", "зонам", "зонам")} в Pro`) : ""}
+    ${L.fabrics_prints ? lockedNote("Ткани и принты в Pro") : a.fabrics_prints ? `<h3>Ткани и принты</h3><p>${esc(a.fabrics_prints)}</p>` : ""}
   </section>
-  <section class="card accent"><h2>Итог</h2><p>${esc(a.summary)}</p></section>`;
+  ${L.summary ? `<section class="card accent"><h2>Итог</h2>${lockedBlock("", "Итог стилиста в Pro")}</section>` : a.summary ? `<section class="card accent"><h2>Итог</h2><p>${esc(a.summary)}</p></section>` : ""}
+  ${lock ? proCard("Полный разбор уже готов", `${lockedList(L)}. Откроется сразу, без повторного анализа.`) : ""}`;
 }
 
 export function render(root) {
@@ -79,7 +107,7 @@ export function render(root) {
   root.innerHTML = `
   <section class="card">
     <h2>Ваше фото</h2>
-    <p class="muted">Нужно 1-3 фото при дневном свете без фильтров: лицо крупно и в полный рост. Чем честнее свет, тем точнее цветотип. Фото хранятся только в вашем браузере и уходят к модели лишь при анализе.</p>
+    <p class="muted">Нужно 1-3 фото: лицо крупно у окна при дневном свете, без фильтров и яркого макияжа, лучше в белой или серой одежде, и одно фото в полный рост. Цвет одежды, помады и тёплый свет лампы сбивают цветотип. Фото хранятся в вашем браузере, на сервер уходят только на время анализа и там не сохраняются.</p>
     <div class="photos">
       ${profile.photos.map((p, i) => `<div class="photo"><img src="${esc(safeImage(p))}" alt="Фото ${i + 1}"><button type="button" class="x" data-rm="${i}" aria-label="Удалить">×</button></div>`).join("")}
       ${profile.photos.length < MAX_PHOTOS ? `<label class="drop small"><input type="file" accept="image/*" multiple hidden data-photos><span>+ Фото</span></label>` : ""}
@@ -91,7 +119,7 @@ export function render(root) {
     <div class="row"><button type="button" class="primary" data-analyze>Проанализировать</button></div>
     <div data-status data-task="profile"></div>
   </section>
-  <div data-result>${safeHtml(() => renderAnalysis(profile.analysis))}</div>`;
+  <div data-result>${safeHtml(() => renderAnalysis(profile.analysis, state.locks.analysis?.locked))}</div>`;
 
   readImages(root.querySelector("[data-photos]") || document.createElement("input"), async (files) => {
     try {
@@ -129,29 +157,20 @@ export function render(root) {
 
   btn.addEventListener("click", async () => {
     const status = root.querySelector("[data-status]");
-    const problem = slotProblem(settings.vision);
-    if (problem) return toast(problem, "error");
     if (!profile.photos.length) return toast("Добавьте хотя бы одно фото", "error");
-    const result = await runTask(status, [btn], async ({ signal, onProgress, setLabel, notice }) => {
+    const result = await runTask(status, [btn], async ({ signal, onProgress, setLabel }) => {
       setLabel("Анализирую фото");
-      const form = Object.entries(profile.inputs)
-        .filter(([, v]) => v)
-        .map(([k, v]) => `${k}: ${v}`)
-        .join("\n");
-      const { data } = await chatJson({
-        slot: settings.vision,
-        system: ANALYSIS_SYSTEM,
-        user: `Анкета клиента:\n${form || "не заполнена"}\n\nПожелания по стилю: ${state.wishes || "нет"}\n\nФото клиента во вложении (${profile.photos.length} шт.).`,
-        images: profile.photos,
-        expect: ["color_type", "body"],
-        signal,
-        onProgress,
-        onNotice: notice,
-      });
+      const r = await runServerTask(
+        "analysis",
+        { photos: profile.photos, inputs: profile.inputs, wishes: state.wishes },
+        { signal, onProgress },
+      );
       // Сначала приводим к форме и отрисовываем, и только потом сохраняем: кривой ответ не должен затереть прежний анализ.
-      const analysis = normalizeAnalysis(data);
-      const html = renderAnalysis(analysis);
+      const analysis = normalizeAnalysis(r.data);
+      const html = renderAnalysis(analysis, r.locked);
       profile.analysis = analysis;
+      if (r.locked) state.locks.analysis = { locked: r.locked, sealed: r.sealed };
+      else delete state.locks.analysis;
       save();
       return html;
     });

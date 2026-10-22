@@ -2,6 +2,8 @@
 
 Architecture for moving the client from one global state with tab views to feature modules on a small kernel, then adding a calendar of past and planned looks. Code is written by agents from the briefs in `tasks/`. This folder is the source of truth for those tasks.
 
+> **Status (2026-10-22): partly superseded.** Prompts, model selection, the LLM client and the free/Pro boundary moved to the server (`lib/api.mjs`, `lib/tasks.mjs`, `lib/prompts.mjs`, `lib/llm.mjs`), and `POST /api/llm` is gone. The client now calls `POST /api/task` through `public/js/api.js`. `target.md` section 2 ("server side is out of scope, the client keeps calling `/api/llm`") and every brief that moves `llm.js`, `prompts.js`, provider settings or API-key UI into `public/js/ai/`, `core/settings.js` or module `prompts.js` files no longer match the code. Revise T1 to T3 before handing them to an agent. The calendar design (`calendar.md`, T4 to T6) is unaffected except that T6 must add wear history to the server-side prompt input, not to a client prompt.
+
 | File                                  | What it is                                                                                                                                         |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `target.md`                           | Target architecture: layers, import rules, module contract, storage and migration, events, extension points, invariants. Every brief refers to it. |

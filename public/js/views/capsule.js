@@ -1,9 +1,9 @@
-import { state, settings, save } from "../store.js";
-import { chatJson, slotProblem } from "../llm.js";
-import { CAPSULE_SYSTEM, profileBrief, wardrobeBrief } from "../prompts.js";
+import { state, save } from "../store.js";
+import { runServerTask, wardrobeForServer, profileForServer, sealedAnalysis } from "../api.js";
 import { esc, arr, safeHex } from "../util.js";
-import { runTask, thumb, toast, swatches, catLabel, PRIORITY, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
+import { runTask, thumb, swatches, catLabel, PRIORITY, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
 import { normalizeCapsule } from "../normalize.js";
+import { lockedNote, proCard, count } from "../pro.js";
 
 const SEASONS = ["Круглый год", "Весна-лето", "Осень-зима", "Зима", "Лето"];
 
@@ -15,7 +15,8 @@ function buyThumb(b) {
   return `<div class="thumb ph buy" style="background:${safeHex(b.color_hex)}" title="${esc(b.color)}"><span>${esc(catLabel(b.category))}</span></div>`;
 }
 
-function capsuleView(c) {
+function capsuleView(c, lock = null) {
+  const L = lock || {};
   const wardrobe = new Map(state.wardrobe.map((w) => [w.id, w]));
   const buy = new Map(arr(c.buy).map((b) => [b.id, b]));
   const keep = arr(c.keep).filter((k) => wardrobe.has(k.id));
@@ -35,7 +36,7 @@ function capsuleView(c) {
       .join("")}</div></section>`
       : ""
   }
-  <section class="card"><h2>Что докупить <span class="count">${arr(c.buy).length}</span></h2>
+  <section class="card"><h2>Что докупить <span class="count">${arr(c.buy).length + (L.buy || 0)}</span></h2>
     <div class="items">${arr(c.buy)
       .map(
         (b) => `<article class="item buy-item">${buyThumb(b)}<div class="item-body">
@@ -54,8 +55,19 @@ function capsuleView(c) {
           <a class="btn small" href="#search/${esc(b.id)}">Найти в магазинах</a>
         </div></article>`,
       )
-      .join("")}</div></section>
-  <section class="card"><h2>Образы капсулы <span class="count">${arr(c.looks).length}</span></h2>
+      .join("")}</div>
+    ${L.buy ? lockedNote(`Ещё ${count(L.buy, "вещь", "вещи", "вещей")} в списке покупок, в Pro`) : ""}</section>
+  ${
+    L.buy || L.looks
+      ? proCard(
+          `Капсула целиком: ещё ${[L.buy && count(L.buy, "покупка", "покупки", "покупок"), L.looks && count(L.looks, "образ", "образа", "образов")].filter(Boolean).join(" и ")}`,
+          "Полный список покупок с парами, образы капсулы и заметки по её развитию уже готовы и откроются сразу.",
+        )
+      : ""
+  }
+  ${
+    arr(c.looks).length
+      ? `<section class="card"><h2>Образы капсулы <span class="count">${arr(c.looks).length}</span></h2>
     ${arr(c.looks)
       .map((l) => {
         // Покупка или своя вещь определяется по принадлежности к списку покупок, а не по наличию фото.
@@ -70,7 +82,9 @@ function capsuleView(c) {
           )
           .join("")}</div><p>${esc(l.description)}</p></article>`;
       })
-      .join("")}</section>
+      .join("")}</section>`
+      : ""
+  }
   ${drop.length ? `<section class="card"><h2>Пока не берём</h2><ul>${drop.map((d) => `<li><strong>${esc(wardrobe.get(d.id).name)}</strong>: ${esc(d.reason)}</li>`).join("")}</ul></section>` : ""}
   ${c.notes ? `<section class="card"><h2>Заметки</h2><p>${esc(c.notes)}</p></section>` : ""}`;
 }
@@ -93,7 +107,7 @@ export function render(root) {
     <div class="row"><button type="button" class="primary" data-run>${state.capsule ? "Пересобрать капсулу" : "Собрать капсулу"}</button></div>
     <div data-status data-task="capsule"></div>
   </section>
-  <div data-result>${state.capsule ? safeHtml(() => capsuleView(state.capsule)) : ""}</div>`;
+  <div data-result>${state.capsule ? safeHtml(() => capsuleView(state.capsule, state.locks.capsule?.locked)) : ""}</div>`;
 
   root.querySelectorAll("[data-o]").forEach((el) =>
     el.addEventListener("change", () => {
@@ -115,24 +129,26 @@ export function render(root) {
   }
 
   btn.addEventListener("click", async () => {
-    const problem = slotProblem(settings.stylist);
-    if (problem) return toast(problem, "error");
     const useW = o.useWardrobe && n > 0;
-    const ok = await runTask(statusEl, [btn], async ({ signal, onProgress, setLabel, notice }) => {
+    const ok = await runTask(statusEl, [btn], async ({ signal, onProgress, setLabel }) => {
       setLabel("Собираю капсулу");
-      const { data } = await chatJson({
-        slot: settings.stylist,
-        system: CAPSULE_SYSTEM,
-        user: `Клиент:\n${profileBrief(state)}\n\nГардероб клиента (id: описание):\n${useW ? wardrobeBrief(state.wardrobe) : "Не используем, собираем капсулу с нуля."}\n\nЗапрос:\n- размер капсулы: до ${o.size} вещей\n- сезон: ${o.season}\n- бюджет на докупку: ${o.budget || "не ограничен"}\n- пожелания: ${state.wishes || "нет"}`,
-        expect: ["buy", "keep", "concept"],
-        signal,
-        onProgress,
-        onNotice: notice,
-      });
+      const r = await runServerTask(
+        "capsule",
+        {
+          profile: profileForServer(),
+          wardrobe: useW ? wardrobeForServer() : [],
+          useWardrobe: useW,
+          options: { size: o.size, season: o.season, budget: o.budget },
+          wishes: state.wishes,
+        },
+        { sealed: sealedAnalysis(), signal, onProgress },
+      );
       // Нормализуем и рисуем до сохранения: кривой ответ не должен затереть прежнюю капсулу.
-      const capsule = normalizeCapsule(data, new Set(state.wardrobe.map((w) => w.id)));
-      const html = capsuleView(capsule);
+      const capsule = normalizeCapsule(r.data, new Set(state.wardrobe.map((w) => w.id)));
+      const html = capsuleView(capsule, r.locked);
       state.capsule = capsule;
+      if (r.locked) state.locks.capsule = { locked: r.locked, sealed: r.sealed };
+      else delete state.locks.capsule;
       state.search = {};
       save();
       return html;

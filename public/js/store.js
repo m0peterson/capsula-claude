@@ -1,4 +1,4 @@
-// Данные клиента (фото, гардероб, результаты) лежат в IndexedDB браузера. Настройки и ключи в localStorage.
+// Данные клиента (фото, гардероб, результаты) лежат в IndexedDB браузера. Настройки и Pro-токен в localStorage.
 // На сервер ничего не сохраняется.
 
 import { normalizeAnalysis, normalizeLooks, normalizeCapsule, normalizeSearch } from "./normalize.js";
@@ -17,19 +17,19 @@ export const defaultState = () => ({
   search: {},
   searchLast: "",
   capsuleOptions: null,
+  // Урезанные результаты бесплатного плана: { analysis | looks | capsule: { locked, sealed } }.
+  // locked говорит, сколько и чего скрыто, sealed это зашифрованный полный результат: после покупки Pro его вскрывает сервер.
+  locks: {},
 });
 
+export const LOCKABLE = ["analysis", "looks", "capsule"];
+
 export const defaultSettings = () => ({
-  accessCode: "",
-  providers: {
-    openrouter: { apiKey: "" },
-    "opencode-go": { apiKey: "" },
-    custom: { apiKey: "", baseUrl: "" },
-  },
-  // Слот vision получает фото (анализ клиента, распознавание вещей).
-  // Слот stylist работает с текстом (образы, капсула, поиск).
-  vision: { provider: "openrouter", model: "meta/muse-spark-1.3-contributor", effort: "xhigh", maxTokens: 0 },
-  stylist: { provider: "openrouter", model: "openai/gpt-6-luna", effort: "xhigh", maxTokens: 0 },
+  proToken: "",
+  proUntil: 0,
+  // Код разработчика (ADMIN_CODE на сервере): открывает всё и позволяет подменять модели для сравнения.
+  devCode: "",
+  dev: { provider: "", vision: { model: "", effort: "" }, text: { model: "", effort: "" } },
 });
 
 export const state = defaultState();
@@ -89,6 +89,12 @@ export function migrate(st) {
   if (st.profile.analysis) st.profile.analysis = attempt("анализ", () => normalizeAnalysis(st.profile.analysis));
   st.looks = attempt("образы", () => normalizeLooks({ looks: st.looks }, ids)) || [];
   if (st.capsule) st.capsule = attempt("капсула", () => normalizeCapsule(st.capsule, ids));
+  const locks = isRecord(st.locks) ? st.locks : {};
+  st.locks = {};
+  for (const k of LOCKABLE) {
+    const l = locks[k];
+    if (isRecord(l) && isRecord(l.locked) && typeof l.sealed === "string") st.locks[k] = { locked: l.locked, sealed: l.sealed };
+  }
   st.search = isRecord(st.search) ? st.search : {};
   for (const [k, v] of Object.entries(st.search)) {
     st.search[k] = isRecord(v) ? { ...v, results: normalizeSearch(v.results) } : undefined;
@@ -108,19 +114,20 @@ export async function init() {
     console.warn("IndexedDB недоступен, данные не сохранятся", e);
   }
   try {
+    // Настройки прошлой версии (ключи API и модели в браузере) больше не нужны: всё это теперь на сервере.
     const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
-    if (raw) {
+    if (isRecord(raw)) {
       const d = defaultSettings();
+      const dev = isRecord(raw.dev) ? raw.dev : {};
       settings = {
-        ...d,
-        ...raw,
-        providers: {
-          openrouter: { ...d.providers.openrouter, ...raw.providers?.openrouter },
-          "opencode-go": { ...d.providers["opencode-go"], ...raw.providers?.["opencode-go"] },
-          custom: { ...d.providers.custom, ...raw.providers?.custom },
+        proToken: typeof raw.proToken === "string" ? raw.proToken : "",
+        proUntil: Number.isFinite(raw.proUntil) ? raw.proUntil : 0,
+        devCode: typeof raw.devCode === "string" ? raw.devCode : "",
+        dev: {
+          provider: typeof dev.provider === "string" ? dev.provider : "",
+          vision: { ...d.dev.vision, ...(isRecord(dev.vision) ? dev.vision : {}) },
+          text: { ...d.dev.text, ...(isRecord(dev.text) ? dev.text : {}) },
         },
-        vision: { ...d.vision, ...raw.vision },
-        stylist: { ...d.stylist, ...raw.stylist },
       };
     }
   } catch {
@@ -160,6 +167,16 @@ export async function resetAll() {
 }
 
 export const exportData = () => JSON.stringify({ version: 1, state }, null, 1);
+
+// Полный результат вместо урезанного: после покупки Pro.
+export function replaceLocked(task, full) {
+  const ids = new Set(state.wardrobe.map((w) => w.id));
+  if (task === "analysis") state.profile.analysis = normalizeAnalysis(full);
+  else if (task === "looks") state.looks = normalizeLooks(full, ids);
+  else if (task === "capsule") state.capsule = normalizeCapsule(full, ids);
+  delete state.locks[task];
+  save();
+}
 
 export async function importData(text) {
   let parsed;

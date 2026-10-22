@@ -1,11 +1,11 @@
-import { state, settings, save } from "../store.js";
-import { chatJson, slotProblem } from "../llm.js";
-import { WARDROBE_SYSTEM } from "../prompts.js";
+import { state, save } from "../store.js";
+import { runServerTask } from "../api.js";
 import { esc, arr, uid, fileToDataUrl, safeImage } from "../util.js";
-import { recognizedItems } from "../normalize.js";
+import { normalizeItem } from "../normalize.js";
 import { runTask, thumb, toast, readImages, CATEGORIES, emptyState, isRunning, RUNNING_NOTE } from "../ui.js";
 
 const BATCH = 6;
+const PARALLEL = 3;
 
 function card(w) {
   const cats = Object.entries(CATEGORIES)
@@ -89,38 +89,48 @@ export function render(root) {
   });
 
   recBtn.addEventListener("click", async () => {
-    const problem = slotProblem(settings.vision);
-    if (problem) return toast(problem, "error");
-    const done = await runTask(statusEl, [recBtn], async ({ signal, onProgress, setLabel, notice }) => {
+    const done = await runTask(statusEl, [recBtn], async ({ signal, setLabel, notice }) => {
       const pending = items.filter((w) => !w.recognized);
       // Вещь без годной картинки (например, после импорта копии) распознать нельзя: пустой image_url провайдер отклонит.
       const queue = pending.filter((w) => safeImage(w.image));
       if (queue.length < pending.length)
         notice(`У вещей без фото распознавание пропущено: ${pending.length - queue.length}. Заполните их вручную.`);
       if (!queue.length) throw new Error("Нет вещей с фото для распознавания.");
+      // Пачки идут параллельно, по PARALLEL за раз: 30 вещей распознаются за время двух запросов, а не пяти.
+      const batches = [];
+      for (let i = 0; i < queue.length; i += BATCH) batches.push(queue.slice(i, i + BATCH));
       let recognized = 0;
-      for (let i = 0; i < queue.length; i += BATCH) {
-        const batch = queue.slice(i, i + BATCH);
-        setLabel(`Распознаю вещи ${i + 1}-${i + batch.length} из ${queue.length}`);
-        const { data } = await chatJson({
-          slot: settings.vision,
-          system: WARDROBE_SYSTEM,
-          user: `Распознай вещи на ${batch.length} фото. Фото идут по порядку, начиная с 1.`,
-          images: batch.map((w) => w.image),
-          expect: ["items"],
-          signal,
-          onProgress,
-          onNotice: notice,
-        });
-        // Только осмысленные записи: мусор не должен помечать вещь распознанной.
-        for (const { target, item } of recognizedItems(data, batch.length)) {
-          Object.assign(batch[target], item);
-          recognized++;
+      let finished = 0;
+      const errors = [];
+      setLabel(`Распознаю вещи: ${queue.length} шт.`);
+      const work = async (batch) => {
+        try {
+          const { data } = await runServerTask("wardrobe", { photos: batch.map((w) => w.image) }, { signal });
+          // Только осмысленные записи: мусор не должен помечать вещь распознанной.
+          for (const row of arr(data?.items)) {
+            const item = normalizeItem(row?.item);
+            const target = Number(row?.target);
+            if (!item || !Number.isInteger(target) || target < 0 || target >= batch.length) continue;
+            Object.assign(batch[target], item);
+            recognized++;
+          }
+          save();
+          paintList();
+        } catch (e) {
+          if (e?.name === "AbortError") throw e;
+          errors.push(e);
+        } finally {
+          finished += batch.length;
+          setLabel(`Распознаю вещи: готово ${finished} из ${queue.length}`);
         }
-        save();
-        paintList();
-      }
-      if (!recognized) throw new Error("Модель не вернула ни одной распознанной вещи. Попробуйте ещё раз или смените модель.");
+      };
+      const next = async () => {
+        while (batches.length) await work(batches.shift());
+      };
+      await Promise.all(Array.from({ length: Math.min(PARALLEL, batches.length) }, next));
+      if (!recognized && errors.length) throw errors[0];
+      if (errors.length) notice(`Часть вещей не распознана: ${errors[0].message}`);
+      if (!recognized) throw new Error("Модель не вернула ни одной распознанной вещи. Попробуйте ещё раз.");
     });
     paintList(); // runTask включает кнопку в finally: возвращаем ей правильное состояние
     if (done) {

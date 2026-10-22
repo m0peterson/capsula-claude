@@ -1,63 +1,66 @@
-import { state, settings, saveSettings, resetAll, exportData, importData } from "../store.js";
-import { EFFORTS, MODEL_SUGGESTIONS } from "../llm.js";
+import { settings, saveSettings, resetAll, exportData, importData } from "../store.js";
+import { serverConfig, isPro } from "../api.js";
 import { esc } from "../util.js";
 import { toast } from "../ui.js";
+import { activate, openPaywall, proUntilText } from "../pro.js";
 
-const PROVIDER_NAMES = { openrouter: "OpenRouter", "opencode-go": "OpenCode Go", custom: "Свой провайдер (OpenAI-совместимый)" };
+const EFFORTS = ["", "none", "minimal", "low", "medium", "high", "xhigh"];
+const PROVIDER_NAMES = { "": "как на сервере", openrouter: "OpenRouter", "opencode-go": "OpenCode Go" };
+const MODEL_SUGGESTIONS = [
+  "deepseek/deepseek-v4.1-flash",
+  "openai/gpt-6-luna",
+  "z-ai/glm-5.3-flash",
+  "anthropic/claude-haiku-5.5",
+  "google/gemini-4-argon",
+  "deepseek-v4.1-flash",
+  "glm-5.3-flash",
+  "qwen3.8-flash",
+];
 
-function slotHtml(name, title, hint) {
-  const s = settings[name];
+function planHtml() {
+  const cfg = serverConfig();
+  if (settings.devCode) {
+    return `<p>Включён режим разработчика: все результаты открыты, модели можно подменять ниже.</p>
+      <div class="row"><button type="button" data-dev-off>Выключить режим разработчика</button></div>`;
+  }
+  if (isPro()) return `<p><span class="tag pro">Pro</span> ${esc(proUntilText())}</p>`;
+  if (!cfg?.paywall) return `<p class="muted">На этом сервере всё открыто бесплатно.</p>`;
+  return `<p>Сейчас бесплатный план: видна часть палитры, первые два образа и три главные покупки капсулы.</p>
+    <div class="row"><button type="button" class="primary" data-paywall>Получить Pro${cfg.price ? ` · ${esc(cfg.price)}` : ""}</button></div>`;
+}
+
+function devHtml() {
+  if (!settings.devCode) return "";
+  const d = settings.dev;
+  const slot = (name, title) => `<fieldset class="form"><legend>${title}</legend>
+    <label class="field"><span>Модель</span><input data-dev="${name}.model" value="${esc(d[name].model)}" list="dev-models" placeholder="как на сервере" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Effort</span><select data-dev="${name}.effort">${EFFORTS.map((e) => `<option value="${e}" ${e === d[name].effort ? "selected" : ""}>${e || "как на сервере"}</option>`).join("")}</select></label>
+  </fieldset>`;
   return `<section class="card">
-    <h2>${title}</h2>
-    <p class="muted">${hint}</p>
-    <div class="form">
-      <label class="field"><span>Провайдер</span>
-        <select data-slot="${name}" data-k="provider">${Object.entries(PROVIDER_NAMES)
-          .map(([k, v]) => `<option value="${k}" ${k === s.provider ? "selected" : ""}>${v}</option>`)
-          .join("")}</select></label>
-      <label class="field"><span>Модель</span>
-        <input data-slot="${name}" data-k="model" value="${esc(s.model)}" list="models-${name}" autocomplete="off" spellcheck="false">
-        <datalist id="models-${name}">${(MODEL_SUGGESTIONS[s.provider] || []).map((m) => `<option value="${esc(m)}">`).join("")}</datalist></label>
-      <label class="field"><span>Режим рассуждения (effort)</span>
-        <select data-slot="${name}" data-k="effort">${EFFORTS.map((e) => `<option value="${e}" ${e === s.effort ? "selected" : ""}>${e || "не передавать"}</option>`).join("")}</select></label>
-      <label class="field"><span>Лимит ответа, токенов (0 = не передавать)</span>
-        <input type="number" min="0" step="1000" data-slot="${name}" data-k="maxTokens" value="${esc(s.maxTokens ?? "")}" placeholder="0 = не передавать"></label>
-    </div>
-    <p class="muted">Лимит ответа включает рассуждения. При effort <code>xhigh</code> часть провайдеров отдаёт рассуждениям до 95% лимита, поэтому ставьте с большим запасом (от 32000) или оставьте 0.</p>
+    <h2>Модели (разработчик)</h2>
+    <p class="muted">Подмена действует только для запросов из этого браузера. Пустое поле значит «как на сервере».</p>
+    <label class="field"><span>Провайдер</span><select data-dev="provider">${Object.entries(PROVIDER_NAMES)
+      .map(([k, v]) => `<option value="${k}" ${k === d.provider ? "selected" : ""}>${v}</option>`)
+      .join("")}</select></label>
+    ${slot("vision", "Фото: анализ и распознавание вещей")}
+    ${slot("text", "Текст: образы, капсула, поиск")}
+    <datalist id="dev-models">${MODEL_SUGGESTIONS.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
   </section>`;
 }
 
-export function render(root, ctx) {
-  const sc = ctx.serverConfig;
-  const pilot =
-    sc &&
-    Object.entries(sc.serverKeys)
-      .filter(([, v]) => v)
-      .map(([k]) => PROVIDER_NAMES[k]);
-  const p = settings.providers;
-
+export function render(root) {
   root.innerHTML = `
   <section class="card">
-    <h2>Ключи API</h2>
-    <p class="muted">Ключи хранятся только в этом браузере (localStorage) и передаются через ваш прокси к провайдеру. Если ключ не указан, используется токен пилота с сервера.</p>
-    ${pilot?.length ? `<p class="hint">На сервере настроен токен пилота: ${pilot.join(", ")}.${sc.accessCodeRequired ? " Нужен код доступа." : ""}</p>` : `<p class="hint">Токен пилота на сервере не настроен. Добавьте свой ключ ниже.</p>`}
-    ${sc?.accessCodeRequired ? `<label class="field wide"><span>Код доступа к пилоту</span><input type="password" data-access value="${esc(settings.accessCode)}" autocomplete="off"></label>` : ""}
-    <div class="form">
-      <label class="field"><span>OpenRouter API key</span><input type="password" data-key="openrouter" value="${esc(p.openrouter.apiKey)}" placeholder="sk-or-..." autocomplete="off"></label>
-      <label class="field"><span>OpenCode Go API key</span><input type="password" data-key="opencode-go" value="${esc(p["opencode-go"].apiKey)}" autocomplete="off"></label>
-      <label class="field"><span>Свой провайдер: Base URL</span><input data-base value="${esc(p.custom.baseUrl)}" placeholder="https://api.example.com/v1"></label>
-      <label class="field"><span>Свой провайдер: ключ</span><input type="password" data-key="custom" value="${esc(p.custom.apiKey)}" autocomplete="off"></label>
-    </div>
+    <h2>Подписка</h2>
+    ${planHtml()}
+    <details class="code-entry"><summary>Ввести код</summary>
+      <div class="row"><input data-code autocomplete="off" spellcheck="false" placeholder="Код Pro или код разработчика"><button type="button" data-activate>Активировать</button></div>
+    </details>
   </section>
-  ${slotHtml("vision", "Модель для фото", "Получает фотографии: анализ клиента и распознавание вещей. Нужна модель с поддержкой изображений.")}
-  ${slotHtml("stylist", "Модель стилиста", "Работает с текстом: образы, капсула, поиск. Веб-поиск доступен только через OpenRouter.")}
-  <section class="card warn">
-    <h3>Приватность</h3>
-    <p>Модели с суффиксом <code>-contributor</code> дешевле, потому что провайдер вправе использовать запросы и ответы для обучения. Фото клиентов и их данные лучше отправлять на обычные версии моделей. Для пилота с реальными клиентами это обязательно проверить.</p>
-  </section>
+  ${devHtml()}
   <section class="card">
     <h2>Данные</h2>
-    <p class="muted">Фото, гардероб и результаты лежат в этом браузере. Если очистить данные сайта, они пропадут, поэтому сохраняйте копию.</p>
+    <p class="muted">Фото, гардероб и результаты лежат только в этом браузере. Если очистить данные сайта, они пропадут, поэтому сохраняйте копию.</p>
     <div class="row">
       <button type="button" data-export>Скачать копию</button>
       <label class="btn"><input type="file" accept="application/json" hidden data-import>Загрузить копию</label>
@@ -65,32 +68,34 @@ export function render(root, ctx) {
     </div>
   </section>`;
 
-  root.querySelector("[data-access]")?.addEventListener("input", (e) => {
-    settings.accessCode = e.target.value.trim();
+  const codeInput = root.querySelector("[data-code]");
+  const activateBtn = root.querySelector("[data-activate]");
+  const go = async () => {
+    if (!codeInput.value.trim()) return codeInput.focus();
+    activateBtn.disabled = true;
+    try {
+      const r = await activate(codeInput.value);
+      toast(r.admin ? "Режим разработчика включён" : `Pro активирован до ${new Date(r.until).toLocaleDateString("ru-RU")}`);
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      activateBtn.disabled = false;
+    }
+  };
+  activateBtn.addEventListener("click", go);
+  codeInput.addEventListener("keydown", (e) => e.key === "Enter" && go());
+
+  root.querySelector("[data-dev-off]")?.addEventListener("click", () => {
+    settings.devCode = "";
     saveSettings();
+    window.dispatchEvent(new CustomEvent("capsula:plan"));
   });
-  root.querySelectorAll("[data-key]").forEach((el) =>
-    el.addEventListener("input", () => {
-      settings.providers[el.dataset.key].apiKey = el.value.trim();
-      saveSettings();
-    }),
-  );
-  root.querySelector("[data-base]").addEventListener("input", (e) => {
-    settings.providers.custom.baseUrl = e.target.value.trim();
-    saveSettings();
-  });
-  root.querySelectorAll("[data-slot]").forEach((el) =>
+  root.querySelectorAll("[data-dev]").forEach((el) =>
     el.addEventListener("change", () => {
-      if (el.type === "number") {
-        // Лимит токенов: целое, не меньше нуля. 0 значит «не передавать».
-        const n = Math.max(0, Math.floor(Number(el.value) || 0));
-        el.value = n;
-        settings[el.dataset.slot][el.dataset.k] = n;
-      } else {
-        settings[el.dataset.slot][el.dataset.k] = el.value.trim();
-      }
+      const [a, b] = el.dataset.dev.split(".");
+      if (b) settings.dev[a][b] = el.value.trim();
+      else settings.dev[a] = el.value;
       saveSettings();
-      if (el.dataset.k === "provider") render(root, ctx); // обновить подсказки моделей
     }),
   );
 
@@ -111,8 +116,10 @@ export function render(root, ctx) {
     }
   });
   root.querySelector("[data-reset]").addEventListener("click", async () => {
-    if (!confirm("Удалить фото, гардероб и все результаты из этого браузера? Настройки и ключи останутся.")) return;
+    if (!confirm("Удалить фото, гардероб и все результаты из этого браузера? Подписка останется.")) return;
     await resetAll();
     toast("Данные удалены");
   });
+  // Ссылка #settings/pro сразу открывает окно Pro: удобно для рекламы и рассылок.
+  if (location.hash === "#settings/pro" && !isPro()) openPaywall();
 }

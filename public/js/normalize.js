@@ -75,6 +75,7 @@ export function normalizeAnalysis(data) {
 
   const color_type = {
     season: text(c.season),
+    neighbor_season: text(c.neighbor_season),
     undertone: text(c.undertone),
     contrast: text(c.contrast),
     confidence: text(c.confidence).toLowerCase(),

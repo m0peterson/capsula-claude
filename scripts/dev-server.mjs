@@ -1,11 +1,11 @@
-// Локальный сервер без зависимостей: статика из public/ и /api/llm.
+// Локальный сервер без зависимостей: статика из public/ и API /api/*.
 // Запуск: npm run dev (порт 8888, переменные окружения читаются как есть).
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { Readable, pipeline } from "node:stream";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleLlm } from "../lib/proxy-core.mjs";
+import { handleApi } from "../lib/api.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 const port = Number(process.env.PORT || 8888);
@@ -21,13 +21,13 @@ const types = {
 
 const server = http.createServer(async (req, res) => {
   try {
-    // Путь вида «//localhost/api/llm» URL разбирает как адрес с другим хостом, поэтому принимаем только «/путь».
+    // Путь вида «//localhost/api/task» URL разбирает как адрес с другим хостом, поэтому принимаем только «/путь».
     if (!req.url.startsWith("/") || req.url.startsWith("//")) {
       res.writeHead(400).end("Bad request");
       return;
     }
     const url = new URL(req.url, "http://localhost");
-    if (url.pathname === "/api/llm") {
+    if (url.pathname.startsWith("/api/")) {
       // Защита от DNS rebinding: на этот API ходит только страница с localhost. Хост берём из заголовка Host.
       let hostname = "";
       try {
@@ -52,7 +52,7 @@ const server = http.createServer(async (req, res) => {
         duplex: "half",
         signal: ctl.signal,
       });
-      const response = await handleLlm(request, (name) => process.env[name]);
+      const response = await handleApi(request, (name) => process.env[name]);
       res.writeHead(response.status, Object.fromEntries(response.headers));
       // pipeline, а не pipe: при обрыве потока провайдера закрывает res, а не роняет процесс необработанным 'error'.
       if (response.body) pipeline(Readable.fromWeb(response.body), res, () => {});

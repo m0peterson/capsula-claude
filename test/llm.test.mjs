@@ -1,15 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-// store.js рассчитан на браузер: подставляем минимальные глобалы.
-globalThis.addEventListener = () => {};
-globalThis.document = { visibilityState: "visible" };
+const { chat, chatJson, resetLearned } = await import("../lib/llm.mjs");
 
-const { settings } = await import("../public/js/store.js");
-const { chat, chatJson, resetLearned } = await import("../public/js/llm.js");
-
-settings.providers.openrouter.apiKey = "sk-test";
-const slot = () => ({ provider: "openrouter", model: "m/x", effort: "xhigh", maxTokens: 16000 });
+const endpoint = { provider: "openrouter", key: "sk-test" };
+const slot = () => ({ model: "m/x", effort: "xhigh", maxTokens: 16000 });
 
 const delta = (content, finish = null) => ({ choices: [{ delta: { content }, finish_reason: finish }] });
 const sse = (chunks, { done = true } = {}) =>
@@ -22,14 +17,16 @@ const errorResponse = (status, message) => new Response(JSON.stringify({ error: 
 
 function mockFetch(...responses) {
   const bodies = [];
+  const calls = [];
   const original = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
     bodies.push(JSON.parse(init.body));
     const next = responses.shift();
     assert.ok(next, "неожиданный лишний запрос");
     return typeof next === "function" ? next() : next;
   };
-  return { bodies, restore: () => (globalThis.fetch = original) };
+  return { bodies, calls, restore: () => (globalThis.fetch = original) };
 }
 
 const run = (fn) => async () => {
@@ -42,7 +39,7 @@ const run = (fn) => async () => {
 };
 const fetch0 = globalThis.fetch;
 
-const ask = () => chatJson({ slot: slot(), system: "JSON", user: "q" });
+const ask = () => chatJson({ endpoint, slot: slot(), system: "JSON", user: "q" });
 
 test(
   "параметры запроса: стрим, effort, лимит токенов, JSON-режим",
@@ -176,7 +173,7 @@ test(
   "ошибка внутри потока пробрасывается",
   run(async () => {
     mockFetch(sse([delta('{"a"'), { error: { message: "Provider disconnected" } }], { done: false }));
-    await assert.rejects(chat({ slot: slot(), messages: [] }), /Provider disconnected/);
+    await assert.rejects(chat({ endpoint, slot: slot(), messages: [] }), /Provider disconnected/);
   }),
 );
 
@@ -184,7 +181,7 @@ test(
   "пустой ответ при finish_reason=length объясняет про рассуждения",
   run(async () => {
     mockFetch(sse([{ choices: [{ delta: { reasoning: "думаю..." }, finish_reason: null }] }, delta("", "length")]));
-    await assert.rejects(chat({ slot: slot(), messages: [] }), /исчерпан лимит токенов/);
+    await assert.rejects(chat({ endpoint, slot: slot(), messages: [] }), /исчерпан лимит токенов/);
   }),
 );
 
@@ -192,7 +189,7 @@ test(
   "maxTokens=0 не отправляется",
   run(async () => {
     const m = mockFetch(jsonStream({ a: 1 }));
-    await chatJson({ slot: { ...slot(), maxTokens: 0 }, system: "JSON", user: "q" });
+    await chatJson({ endpoint, slot: { ...slot(), maxTokens: 0 }, system: "JSON", user: "q" });
     assert.equal(m.bodies[0].max_tokens, undefined);
   }),
 );
@@ -281,7 +278,7 @@ test(
     );
     const notices = [];
     const m = mockFetch(wrapped, jsonStream({ a: 1 }));
-    await chatJson({ slot: slot(), system: "JSON", user: "q", onNotice: (n) => notices.push(n) });
+    await chatJson({ endpoint, slot: slot(), system: "JSON", user: "q", onNotice: (n) => notices.push(n) });
     assert.equal(m.bodies.length, 2);
     assert.equal(m.bodies[1].reasoning, undefined);
     assert.ok(m.bodies[1].response_format, "JSON-режим сохранён");
@@ -359,7 +356,7 @@ test(
   "посторонняя сноска [1] в тексте до JSON: ответ берётся целиком с первого раза",
   run(async () => {
     const m = mockFetch(sse([delta('Результаты [1]:\n{"results":[{"title":"x"}]}', "stop")]));
-    const { data } = await chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["results"] });
+    const { data } = await chatJson({ endpoint, slot: slot(), system: "JSON", user: "q", expect: ["results"] });
     assert.deepEqual(data, { results: [{ title: "x" }] });
     assert.equal(m.bodies.length, 1);
   }),
@@ -396,16 +393,13 @@ test(
 );
 
 test(
-  "запомненный отказ не переносится на другой адрес своего провайдера",
+  "запомненный отказ не переносится на другого провайдера",
   run(async () => {
-    settings.providers.custom.baseUrl = "https://a.example.com/v1";
-    settings.providers.custom.apiKey = "k";
-    const custom = () => ({ provider: "custom", model: "m/x", effort: "xhigh", maxTokens: 0 });
+    const go = { provider: "opencode-go", key: "k" };
     const m = mockFetch(errorResponse(400, "Unsupported parameter: response_format"), jsonStream({ a: 1 }), jsonStream({ a: 1 }));
-    await chatJson({ slot: custom(), system: "JSON", user: "q" });
-    settings.providers.custom.baseUrl = "https://b.example.com/v1";
-    await chatJson({ slot: custom(), system: "JSON", user: "q" });
-    assert.ok(m.bodies[2].response_format, "на другом адресе JSON-режим пробуется снова");
+    await chatJson({ endpoint, slot: slot(), system: "JSON", user: "q" });
+    await chatJson({ endpoint: go, slot: slot(), system: "JSON", user: "q" });
+    assert.ok(m.bodies[2].response_format, "у другого провайдера JSON-режим пробуется снова");
   }),
 );
 
@@ -453,7 +447,7 @@ test(
   run(async () => {
     const items = JSON.stringify(Array.from({ length: 5 }, (_, i) => ({ index: i + 1, name: `Вещь ${i}` })));
     mockFetch(sse([delta(items.slice(0, items.length - 20), "length")]));
-    await assert.rejects(chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["items"] }), (e) => e.truncated === true);
+    await assert.rejects(chatJson({ endpoint, slot: slot(), system: "JSON", user: "q", expect: ["items"] }), (e) => e.truncated === true);
   }),
 );
 
@@ -463,7 +457,7 @@ test(
     const items = Array.from({ length: 5 }, (_, i) => ({ index: i + 1, name: `Вещь ${i}` }));
     const odd = JSON.stringify({ items }).replace('"Вещь 1"', '"Вещь 5" 1"');
     const m = mockFetch(sse([delta(odd, "stop")]), jsonStream({ items }));
-    const { data } = await chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["items"] });
+    const { data } = await chatJson({ endpoint, slot: slot(), system: "JSON", user: "q", expect: ["items"] });
     assert.equal(data.items.length, 5);
     assert.equal(m.bodies.length, 2);
   }),
@@ -539,7 +533,7 @@ test(
     const text = 'Анализ [фото:\n{"color_type":{"season":"осень"},"body":{"type":"груша"}}';
     mockFetch(sse([delta(text, "length")]));
     await assert.rejects(
-      chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["color_type", "body"] }),
+      chatJson({ endpoint, slot: slot(), system: "JSON", user: "q", expect: ["color_type", "body"] }),
       (e) => e.truncated === true,
     );
   }),
@@ -550,7 +544,70 @@ test(
   run(async () => {
     const draft = '{"items":[{"index":1,"name":"A"},{"index":2,"name":"B"},{"index":3,"name":"Сумка"}]}';
     mockFetch(sse([delta(`черновик ${draft} сумки нет\n</think>\n{"items":[{"index":1,"name":"A"},{"index":2,"name":"B"}]}`, "stop")]));
-    const { data } = await chatJson({ slot: slot(), system: "JSON", user: "q", expect: ["items"] });
+    const { data } = await chatJson({ endpoint, slot: slot(), system: "JSON", user: "q", expect: ["items"] });
     assert.equal(data.items.length, 2);
+  }),
+);
+
+// --- Серверный клиент ------------------------------------------------------------------------------------
+test(
+  "OpenRouter: провайдеры без хранения данных, запасная модель, temperature",
+  run(async () => {
+    const m = mockFetch(jsonStream({ a: 1 }));
+    await chatJson({ endpoint, slot: { ...slot(), fallback: "f/y", temperature: 0 }, system: "JSON", user: "q" });
+    const b = m.bodies[0];
+    assert.deepEqual(b.provider, { data_collection: "deny" });
+    assert.deepEqual(b.models, ["m/x", "f/y"]);
+    assert.equal(b.temperature, 0);
+    assert.equal(m.calls[0].url, "https://openrouter.ai/api/v1/chat/completions");
+    assert.equal(m.calls[0].init.headers.authorization, "Bearer sk-test");
+    assert.equal(m.calls[0].init.redirect, "error");
+  }),
+);
+
+test(
+  "OpenCode Go: свой адрес, заголовок сессии, reasoning_effort, без параметров OpenRouter",
+  run(async () => {
+    const m = mockFetch(jsonStream({ a: 1 }));
+    await chatJson({ endpoint: { provider: "opencode-go", key: "oc" }, slot: { ...slot(), fallback: "f/y" }, system: "JSON", user: "q" });
+    const { url, init } = m.calls[0];
+    assert.equal(url, "https://opencode.ai/zen/go/v1/chat/completions");
+    assert.match(init.headers["x-opencode-session"], /^[0-9a-f-]{36}$/);
+    assert.match(init.headers["user-agent"], /capsula/);
+    const b = m.bodies[0];
+    assert.equal(b.reasoning_effort, "xhigh");
+    assert.equal(b.reasoning, undefined);
+    assert.equal(b.provider, undefined);
+    assert.equal(b.models, undefined);
+  }),
+);
+
+test(
+  "провайдер не принимает temperature: повтор без неё, остальное сохраняется",
+  run(async () => {
+    const m = mockFetch(errorResponse(400, "Unsupported parameter: 'temperature' is not supported with this model."), jsonStream({ a: 1 }));
+    await chatJson({ endpoint, slot: { ...slot(), temperature: 0 }, system: "JSON", user: "q" });
+    assert.equal(m.bodies[1].temperature, undefined);
+    assert.ok(m.bodies[1].response_format);
+    assert.deepEqual(m.bodies[1].reasoning, { effort: "xhigh" });
+  }),
+);
+
+test(
+  "расход токенов из последнего чанка возвращается вместе с ответом",
+  run(async () => {
+    mockFetch(sse([delta('{"a":1}', "stop"), { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 } }]));
+    const r = await ask();
+    assert.deepEqual(r.usage, { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 });
+  }),
+);
+
+test(
+  "без ключа и без модели: понятная ошибка до запроса",
+  run(async () => {
+    const m = mockFetch();
+    await assert.rejects(chatJson({ endpoint: { provider: "openrouter", key: "" }, slot: slot(), system: "s", user: "u" }), /ключ/);
+    await assert.rejects(chatJson({ endpoint, slot: { ...slot(), model: " " }, system: "s", user: "u" }), /модель/);
+    assert.equal(m.bodies.length, 0);
   }),
 );

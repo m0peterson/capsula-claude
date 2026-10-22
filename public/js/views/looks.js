@@ -1,9 +1,9 @@
-import { state, settings, save } from "../store.js";
-import { chatJson, slotProblem } from "../llm.js";
-import { LOOKS_SYSTEM, profileBrief, wardrobeBrief } from "../prompts.js";
+import { state, save } from "../store.js";
+import { runServerTask, wardrobeForServer, profileForServer, sealedAnalysis } from "../api.js";
 import { esc, arr } from "../util.js";
-import { runTask, thumb, toast, emptyState, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
+import { runTask, thumb, emptyState, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
 import { normalizeLooks } from "../normalize.js";
+import { proCard, count } from "../pro.js";
 
 export function lookCard(look, byId) {
   const items = arr(look.item_ids)
@@ -18,9 +18,18 @@ export function lookCard(look, byId) {
   </article>`;
 }
 
-function looksHtml(looks) {
+function looksHtml(looks, lock) {
   const byId = new Map(state.wardrobe.map((w) => [w.id, w]));
-  return looks.length ? looks.map((l) => lookCard(l, byId)).join("") : emptyState("Образов пока нет.");
+  const hidden = lock?.looks || 0;
+  return (
+    (looks.length ? looks.map((l) => lookCard(l, byId)).join("") : emptyState("Образов пока нет.")) +
+    (hidden
+      ? proCard(
+          `Ещё ${count(hidden, "образ", "образа", "образов")} уже готовы`,
+          "Они собраны из ваших вещей вместе с этими. Откроются сразу, без повторного подбора.",
+        )
+      : "")
+  );
 }
 
 export function render(root, ctx) {
@@ -42,7 +51,7 @@ export function render(root, ctx) {
   </section>
   <div class="looks" data-looks></div>`;
   const looksEl = root.querySelector("[data-looks]");
-  looksEl.innerHTML = safeHtml(() => looksHtml(state.looks));
+  looksEl.innerHTML = safeHtml(() => looksHtml(state.looks, state.locks.looks?.locked));
 
   root.querySelector("[data-wishes]").addEventListener("input", (e) => {
     state.wishes = e.target.value;
@@ -55,24 +64,20 @@ export function render(root, ctx) {
     root.querySelector("[data-status]").innerHTML = RUNNING_NOTE;
   }
   btn.addEventListener("click", async () => {
-    const problem = slotProblem(settings.stylist);
-    if (problem) return toast(problem, "error");
-    const count = Math.min(12, Math.max(3, Number(root.querySelector("[data-count]").value) || 6));
-    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel, notice }) => {
+    const want = Math.min(12, Math.max(3, Number(root.querySelector("[data-count]").value) || 6));
+    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel }) => {
       setLabel("Собираю образы");
-      const { data } = await chatJson({
-        slot: settings.stylist,
-        system: LOOKS_SYSTEM,
-        user: `Клиент:\n${profileBrief(state)}\n\nГардероб (id: описание):\n${wardrobeBrief(state.wardrobe)}\n\nПожелания: ${state.wishes || "нет"}\n\nСоставь ${count} образов.`,
-        expect: ["looks"],
-        signal,
-        onProgress,
-        onNotice: notice,
-      });
-      const looks = normalizeLooks(data, new Set(state.wardrobe.map((w) => w.id)));
+      const r = await runServerTask(
+        "looks",
+        { profile: profileForServer(), wardrobe: wardrobeForServer(), wishes: state.wishes, count: want },
+        { sealed: sealedAnalysis(), signal, onProgress },
+      );
+      const looks = normalizeLooks(r.data, new Set(state.wardrobe.map((w) => w.id)));
       if (!looks.length) throw new Error("Модель не вернула ни одного образа из ваших вещей. Попробуйте ещё раз.");
-      const html = looksHtml(looks);
+      const html = looksHtml(looks, r.locked);
       state.looks = looks;
+      if (r.locked) state.locks.looks = { locked: r.locked, sealed: r.sealed };
+      else delete state.locks.looks;
       save();
       return html;
     });

@@ -6,7 +6,10 @@ globalThis.document = { visibilityState: "visible" };
 
 const N = await import("../public/js/normalize.js");
 const { migrate, defaultState } = await import("../public/js/store.js");
-const { profileBrief, wardrobeBrief } = await import("../public/js/prompts.js");
+const P = await import("../lib/prompts.mjs");
+const { wardrobeBrief } = P;
+// Тесты писались, когда profileBrief принимал всё состояние. Теперь он на сервере и принимает только профиль.
+const profileBrief = (st) => P.profileBrief(st.profile);
 const { swatches, safeHtml } = await import("../public/js/ui.js");
 const { safeHex } = await import("../public/js/util.js");
 

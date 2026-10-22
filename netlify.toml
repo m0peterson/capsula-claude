@@ -5,9 +5,4 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-[[headers]]
-  for = "/*"
-  [headers.values]
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "no-referrer"
-    Permissions-Policy = "camera=(self), microphone=(), geolocation=()"
+# Заголовки безопасности для Netlify и Cloudflare лежат в public/_headers: оба хостинга читают этот файл.

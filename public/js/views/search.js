@@ -1,10 +1,10 @@
-import { state, settings, save } from "../store.js";
-import { chatJson, slotProblem } from "../llm.js";
-import { SEARCH_SYSTEM } from "../prompts.js";
+import { state, save } from "../store.js";
+import { runServerTask, serverConfig, isLimited } from "../api.js";
 import { SHOPS } from "../shops.js";
 import { esc, arr, safeUrl, isRecord } from "../util.js";
 import { normalizeSearch } from "../normalize.js";
 import { runTask, toast, catLabel, emptyState, safeHtml, isRunning, RUNNING_NOTE } from "../ui.js";
+import { openPaywall } from "../pro.js";
 
 function resultsHtml(entry) {
   if (!entry) return "";
@@ -31,6 +31,7 @@ export function render(root, ctx) {
   const selected = wanted || buy[0] || null;
   // Если пришли из капсулы по ссылке, берём запрос вещи. Иначе показываем тот, по которому искали в прошлый раз.
   const queryDefault = wanted?.search_query || state.searchLast || selected?.search_query || "";
+  const webSearch = serverConfig()?.webSearch !== false;
 
   root.innerHTML = `
   <section class="card">
@@ -46,9 +47,9 @@ export function render(root, ctx) {
     <label class="field wide"><span>Поисковый запрос</span><input data-q value="${esc(queryDefault)}" placeholder="например: бежевый тренч прямой оверсайз"></label>
     <h3>Открыть в магазинах</h3>
     <div class="shops" data-shops></div>
-    <h3>Найти конкретные модели с помощью ИИ</h3>
-    <p class="muted">Модель сама ищет в интернете и приносит ссылки на товары с описанием. ${settings.stylist.provider === "openrouter" ? "" : `<strong>Работает только с OpenRouter, у вас в слоте стилиста выбран другой провайдер.</strong>`}</p>
-    <div class="row"><button type="button" class="primary" data-ai ${settings.stylist.provider === "openrouter" ? "" : "disabled"}>Искать с ИИ</button></div>
+    <h3>Найти конкретные модели с помощью ИИ ${isLimited() ? `<span class="tag pro">Pro</span>` : ""}</h3>
+    <p class="muted">ИИ сам ищет в интернете и приносит ссылки на товары под ваш цветотип и бюджет. ${webSearch ? "" : `<strong>На этом сервере веб-поиск не подключён.</strong>`}</p>
+    <div class="row"><button type="button" class="primary" data-ai ${webSearch ? "" : "disabled"}>Искать с ИИ</button></div>
     <div data-status data-task="search"></div>
     <div data-results></div>
   </section>`;
@@ -85,44 +86,25 @@ export function render(root, ctx) {
   btn.addEventListener("click", async () => {
     const text = q.value.trim();
     if (!text) return toast("Введите запрос", "error");
-    const problem = slotProblem(settings.stylist);
-    if (problem) return toast(problem, "error");
+    if (isLimited()) return openPaywall();
     const item = current();
-    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel, notice }) => {
+    const ok = await runTask(root.querySelector("[data-status]"), [btn], async ({ signal, onProgress, setLabel }) => {
       setLabel("Ищу в интернете");
       const palette = arr(state.profile.analysis?.color_type?.best_colors)
         .filter(isRecord)
-        .map((c) => c.name)
-        .join(", ");
-      const { data, annotations } = await chatJson({
-        slot: settings.stylist,
-        system: SEARCH_SYSTEM,
-        user: `Запрос: ${text}\n${item?.description ? `Описание вещи: ${item.description}\n` : ""}${item?.color ? `Цвет: ${item.color}\n` : ""}Цвета клиента: ${palette || "не определены"}\nБюджет: ${item?.price_range || state.profile.inputs.budget || "не указан"}\nРегион и магазины: ${state.profile.inputs.city || "Россия"}, нужны магазины с доставкой туда.`,
-        extra: { plugins: [{ id: "web", max_results: 10 }] },
-        expect: ["results"],
-        signal,
-        onProgress,
-        onNotice: notice,
-      });
-      let results = normalizeSearch(data);
-      const key = (u) => {
-        const href = safeUrl(u);
-        if (!href) return "";
-        const x = new URL(href);
-        return (x.hostname.replace(/^www\./, "") + x.pathname).replace(/\/+$/, "");
-      };
-      const cited = new Set(
-        arr(annotations)
-          .filter(isRecord)
-          .map((a) => key(a.url_citation?.url || a.url))
-          .filter(Boolean),
-      );
-      // Если источники известны, оставляем только ссылки из реальной выдачи поиска.
-      // Если после фильтра ничего не осталось, показываем всё, но помечаем как непроверенное.
-      const confirmed = results.filter((r) => cited.has(key(r.url)));
-      const verified = confirmed.length > 0;
-      if (verified) results = confirmed;
-      state.search[text] = { results, verified, at: Date.now() };
+        .map((c) => c.name);
+      let r;
+      try {
+        r = await runServerTask(
+          "search",
+          { query: text, item, palette, budget: state.profile.inputs.budget, city: state.profile.inputs.city },
+          { signal, onProgress },
+        );
+      } catch (e) {
+        if (e.code === "pro_required") openPaywall();
+        throw e;
+      }
+      state.search[text] = { results: normalizeSearch(r.data?.results), verified: Boolean(r.data?.verified), at: Date.now() };
       state.searchLast = text;
       save();
     });
