@@ -104,7 +104,7 @@ export function prettyLine(rid, task, e) {
       return `${head}${call} ✗ #${e.attempt} ${e.status ? `HTTP ${e.status} ` : ""}${e.error}${e.detail && e.detail !== e.error ? `\n${indent(e.detail)}` : ""}`;
     case "llm.done": {
       const served = e.model && e.model !== e.requested ? ` ответила ${e.model}` : "";
-      return `${head}${call} ✓ модель ${sec(e.ms)} (первый токен ${sec(e.firstTokenMs)}) ${e.chars} зн.${e.thought ? `, рассуждения ${e.thought} зн.` : ""}, finish=${e.finish}${e.truncated ? " ОБРЕЗАН" : ""}; ${usageText(e.usage)}${served}${e.served ? ` [${e.served}]` : ""}${e.id ? ` id=${e.id}` : ""}`;
+      return `${head}${call} ✓ модель ${sec(e.ms)} (первый токен ${sec(e.firstTokenMs)}) ${e.chars} зн.${e.thought ? `, рассуждения ${e.thought} зн.` : ""}, finish=${e.finish}${e.truncated ? " ОБРЕЗАН" : ""}${e.annotations ? `, источников ${e.annotations}` : ""}; ${usageText(e.usage)}${served}${e.served ? ` [${e.served}]` : ""}${e.id ? ` id=${e.id}` : ""}`;
     }
     case "llm.raw":
       return `${head}${call} ответ модели\n${indent(e.text)}`;

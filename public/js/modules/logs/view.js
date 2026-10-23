@@ -60,7 +60,7 @@ function describe(e) {
     case "llm.error":
       return `✗ #${e.attempt} ${e.status ? `HTTP ${e.status}: ` : ""}${e.error}`;
     case "llm.done":
-      return `✓ модель ответила за ${sec(e.ms)} (первый токен ${sec(e.firstTokenMs)}) · ${e.chars} зн.${e.thought ? `, рассуждения ${e.thought} зн.` : ""} · finish ${e.finish}${e.truncated ? " · ОБРЕЗАН" : ""} · ${usageText(e.usage)}${e.model && e.model !== e.requested ? ` · ответила ${e.model}` : ""}${e.served ? ` [${e.served}]` : ""}`;
+      return `✓ модель ответила за ${sec(e.ms)} (первый токен ${sec(e.firstTokenMs)}) · ${e.chars} зн.${e.thought ? `, рассуждения ${e.thought} зн.` : ""} · finish ${e.finish}${e.truncated ? " · ОБРЕЗАН" : ""}${e.annotations ? ` · источников ${e.annotations}` : ""} · ${usageText(e.usage)}${e.model && e.model !== e.requested ? ` · ответила ${e.model}` : ""}${e.served ? ` [${e.served}]` : ""}`;
     case "llm.raw":
       return `ответ модели: ${e.text?.length ?? 0} зн. (ниже)`;
     case "parse":
