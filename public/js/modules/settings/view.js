@@ -5,20 +5,23 @@ import { activate, openPaywall, proUntilText, disableDevMode } from "../../core/
 import { esc } from "../../lib/html.js";
 import { toast } from "../../ui/components.js";
 
-const EFFORTS = ["", "none", "minimal", "low", "medium", "high", "xhigh"];
+const EFFORTS = ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const PROVIDER_NAMES = { "": "как на сервере", openrouter: "OpenRouter", "opencode-go": "OpenCode Go" };
-const MODEL_SUGGESTIONS = [
-  "deepseek/deepseek-v4.1-flash",
-  "google/gemini-3.8-flash",
-  "qwen/qwen3.8-flash",
-  "openai/gpt-6-luna",
-  "z-ai/glm-5.3-flash",
-  "anthropic/claude-haiku-5.5",
-  "google/gemini-4-argon",
-  "deepseek-v4.1-flash",
-  "glm-5.3-flash",
-  "qwen3.8-flash",
-];
+// Подсказки по провайдерам: имена моделей у OpenRouter и OpenCode Go разные.
+const MODEL_SUGGESTIONS = {
+  openrouter: [
+    "meta/muse-spark-1.3-contributor",
+    "deepseek/deepseek-v4.1-flash",
+    "google/gemini-3.8-flash",
+    "qwen/qwen3.8-flash",
+    "openai/gpt-6-luna",
+    "z-ai/glm-5.3-flash",
+    "anthropic/claude-haiku-5.5",
+    "google/gemini-4-argon",
+  ],
+  // Muse Spark и GPT в OpenCode Go работают через Responses API, сервер выбирает протокол сам.
+  "opencode-go": ["muse-spark-1.3-contributor", "deepseek-v4.1-flash", "qwen3.8-flash", "gpt-6-luna", "glm-5.3-flash", "kimi-k3"],
+};
 
 function planHtml() {
   const cfg = serverConfig();
@@ -35,20 +38,32 @@ function planHtml() {
 function devHtml() {
   if (!settings.devCode) return "";
   const d = settings.dev;
-  const slot = (name, title) => `<fieldset class="form"><legend>${title}</legend>
-    <label class="field"><span>Модель</span><input data-dev="${name}.model" value="${esc(d[name].model)}" list="dev-models" placeholder="как на сервере" autocomplete="off" spellcheck="false"></label>
-    <label class="field"><span>Effort</span><select data-dev="${name}.effort">${EFFORTS.map((e) => `<option value="${e}" ${e === d[name].effort ? "selected" : ""}>${e || "как на сервере"}</option>`).join("")}</select></label>
+  // Что стоит на сервере для выбранного провайдера: показываем вместо безликого «как на сервере».
+  const srv = serverConfig()?.dev;
+  const provider = d.provider || srv?.provider || "openrouter";
+  const onServer = srv?.slots?.[provider] || {};
+  const slot = (name, title) => {
+    const s = onServer[name];
+    return `<fieldset class="form"><legend>${title}</legend>
+    <label class="field"><span>Модель</span><input data-dev="${name}.model" value="${esc(d[name].model)}" list="dev-models" placeholder="${esc(s?.model || "как на сервере")}" autocomplete="off" spellcheck="false"></label>
+    <label class="field"><span>Effort</span><select data-dev="${name}.effort">${EFFORTS.map((e) => `<option value="${e}" ${e === d[name].effort ? "selected" : ""}>${e || `как на сервере${s?.effort ? ` (${esc(s.effort)})` : ""}`}</option>`).join("")}</select></label>
   </fieldset>`;
+  };
+  const missing = srv && d.provider && !srv.providers.includes(d.provider);
   return `<section class="card">
     <h2>Модели (разработчик)</h2>
-    <p class="muted">Подмена действует только для запросов из этого браузера. Пустое поле значит «как на сервере».</p>
+    <p class="muted">Подмена действует только для запросов из этого браузера. Пустое поле значит «как на сервере». Что ушло в модель и что она ответила, видно на вкладке <a href="#logs">«Логи»</a>.</p>
     <label class="field"><span>Провайдер</span><select data-dev="provider">${Object.entries(PROVIDER_NAMES)
-      .map(([k, v]) => `<option value="${k}" ${k === d.provider ? "selected" : ""}>${v}</option>`)
+      .map(
+        ([k, v]) =>
+          `<option value="${k}" ${k === d.provider ? "selected" : ""}>${k ? v : `${v}${srv ? ` (${PROVIDER_NAMES[srv.provider]})` : ""}`}</option>`,
+      )
       .join("")}</select></label>
+    ${missing ? `<p class="hint">На сервере нет ключа ${esc(PROVIDER_NAMES[d.provider])}: запросы пойдут через ${esc(PROVIDER_NAMES[srv.provider])}.</p>` : ""}
     ${slot("vision", "Фото: анализ и распознавание вещей по одной")}
     ${slot("detect", "Вещи из фото образов: поиск, рамки, повторы")}
     ${slot("text", "Текст: образы, капсула, поиск")}
-    <datalist id="dev-models">${MODEL_SUGGESTIONS.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
+    <datalist id="dev-models">${(MODEL_SUGGESTIONS[provider] || []).map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
   </section>`;
 }
 
@@ -96,6 +111,12 @@ export function render(root) {
       if (b) settings.dev[a][b] = el.value.trim();
       else settings.dev[a] = el.value;
       saveSettings();
+      // Другой провайдер: другие подсказки и модели сервера. Модели прошлого провайдера там не существуют.
+      if (!b) {
+        for (const s of ["vision", "detect", "text"]) settings.dev[s].model = "";
+        saveSettings();
+        render(root);
+      }
     }),
   );
 

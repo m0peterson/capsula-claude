@@ -1,7 +1,7 @@
 // Pro: окно оплаты, активация кода, вскрытие полных результатов и заглушки на месте скрытого.
 // Какие результаты урезаны, знают модули: у них в манифесте есть locked { task, sealed(), unlock(full) }.
 import { settings, saveSettings } from "./settings.js";
-import { serverConfig, isPro, activateCode, unlockSealed } from "./api.js";
+import { serverConfig, isPro, activateCode, unlockSealed, fetchConfig } from "./api.js";
 import { modules } from "./registry.js";
 import { emit } from "./events.js";
 import { esc } from "../lib/html.js";
@@ -78,6 +78,8 @@ export async function activate(code) {
   } catch (e) {
     toast(`Pro активирован, но открыть прошлые результаты не удалось: ${e.message}`, "error");
   }
+  // С кодом разработчика сервер отдаёт в конфиге свои модели и уровень логов.
+  if (r.admin) await fetchConfig();
   emit("app:plan-changed");
   return r;
 }
@@ -133,9 +135,10 @@ export function openPaywall() {
   input.focus();
 }
 
-export function disableDevMode() {
+export async function disableDevMode() {
   settings.devCode = "";
   saveSettings();
+  await fetchConfig();
   emit("app:plan-changed");
 }
 

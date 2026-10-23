@@ -37,7 +37,10 @@ export const tasks = {
         system: SEARCH_SYSTEM,
         user: `Запрос: ${c.query}\n${c.description ? `Описание вещи: ${c.description}\n` : ""}${c.color ? `Цвет: ${c.color}\n` : ""}Цвета клиента: ${c.palette.join(", ") || "не определены"}\nБюджет: ${c.price || c.budget || "не указан"}\nРегион и магазины: ${c.city || "Россия"}, нужны магазины с доставкой туда.`,
         expect: ["results"],
-        extra: { plugins: [{ id: "web", max_results: 5 }] },
+        // Движок exa явно: без него OpenRouter для моделей со своим поиском (Muse Spark) включает их родной поиск,
+        // а тот не отдаёт источники (ссылки нечем проверить) и в октябре 2026 выдумывал URL вида .../12345678/.
+        // С exa ссылки из реальной выдачи, с источниками, и запрос в 3 раза дешевле ($0.007 против $0.020).
+        extra: { plugins: [{ id: "web", engine: "exa", max_results: 5 }] },
       };
     },
     finish(data, c, { annotations }) {

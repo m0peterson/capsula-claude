@@ -6,6 +6,8 @@
   "description": "ИИ-стилист: анализ фото, гардероб, образы, капсула, поиск вещей",
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
+    "logs": "node scripts/logs.mjs",
+    "logs:worker": "npx wrangler tail capsula-claude --format pretty",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {

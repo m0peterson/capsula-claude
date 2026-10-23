@@ -12,7 +12,14 @@ export function startShell({ routes }) {
   const planBtn = document.getElementById("plan");
   if (!routes.length) throw new Error("Нет ни одного модуля с вкладкой");
 
-  nav.innerHTML = routes.map((r) => `<a href="#${esc(r.id)}" data-tab="${esc(r.id)}">${esc(r.label)}</a>`).join("");
+  // Вкладка с visible() → false (например, «Логи» без режима разработчика) не показывается и не открывается по ссылке.
+  const shown = () => routes.filter((r) => !r.visible || r.visible());
+  const paintNav = () => {
+    nav.innerHTML = shown()
+      .map((r) => `<a href="#${esc(r.id)}" data-tab="${esc(r.id)}">${esc(r.label)}</a>`)
+      .join("");
+  };
+  paintNav();
   document.querySelector(".brand")?.setAttribute("href", `#${routes[0].id}`);
 
   function serverBanner() {
@@ -48,7 +55,7 @@ export function startShell({ routes }) {
     }
   };
   const parseHash = () => location.hash.replace(/^#/, "").split("/");
-  const currentRoute = () => routes.find((r) => r.id === parseHash()[0]) || routes[0];
+  const currentRoute = () => shown().find((r) => r.id === parseHash()[0]) || routes[0];
 
   function route({ keepScroll = false } = {}) {
     const [, param] = parseHash();
@@ -84,6 +91,7 @@ export function startShell({ routes }) {
   // Pro активирован или включён режим разработчика: открытые результаты нужно перерисовать.
   on("app:plan-changed", () => {
     paintPlan();
+    paintNav();
     refreshNow();
   });
   document.addEventListener("focusout", () => {

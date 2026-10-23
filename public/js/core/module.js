@@ -4,7 +4,8 @@
 //     id: "looks",                         // как папка, /^[a-z][a-z-]*$/
 //     requires: ["profile", "wardrobe"],   // жёсткие зависимости: их api.js модуль может импортировать. В modules.js стоят раньше.
 //     slice,                               // необязательно: данные модуля (defineSlice в model.js)
-//     route: { label, order, render },     // необязательно: вкладка. render(root, { param })
+//     route: { label, order, render, visible? },  // необязательно: вкладка. render(root, { param });
+//                                          // visible() → false прячет вкладку (например, только для разработчика)
 //     init() {},                           // необязательно: подписки на события, один раз после загрузки данных
 //     locked: { task, sealed(), unlock(full) },  // необязательно: результат, урезанный бесплатным планом
 //   });
@@ -23,6 +24,7 @@ export function defineModule(m) {
     const r = m.route;
     if (typeof r.label !== "string" || !Number.isFinite(r.order) || typeof r.render !== "function")
       fail("route это { label, order, render }");
+    if (r.visible !== undefined && typeof r.visible !== "function") fail("route.visible это функция");
   }
   if (m.init && typeof m.init !== "function") fail("init это функция");
   if (m.locked) {

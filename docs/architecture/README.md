@@ -6,7 +6,7 @@
 
 ## 1. Как направить агента на модуль
 
-Модули: `profile`, `wardrobe`, `looks`, `capsule`, `search`, `settings`. У каждого есть `public/js/modules/<id>/README.md`: что внутри, данные, API, события, тесты.
+Модули: `profile`, `wardrobe`, `looks`, `capsule`, `search`, `settings`, `logs`. У каждого есть `public/js/modules/<id>/README.md`: что внутри, данные, API, события, тесты.
 
 Шаблон задания:
 
@@ -30,17 +30,21 @@ public/js/
   lib/            чистые помощники: coerce (приведение типов), html (esc, safe*), json (разбор ответа модели), images, ids, plural
   shared/         словарь предметной области: категории вещей, приоритеты, ошибка «неполный результат»
   ui/             разметка без состояния: toast, swatches, thumb, emptyState, safeHtml
-  core/           ядро: контракт модуля, запуск, хранилище, события, долгие задачи, оболочка, API-клиент, настройки, Pro
+  core/           ядро: контракт модуля, запуск, хранилище, события, долгие задачи, оболочка, API-клиент, настройки, Pro,
+                  журнал задач разработчика (devlog)
   modules/<id>/   модули
   vendor/         jsonrepair
 server/
   api.mjs         HTTP: маршруты, план (free/Pro), лимиты, поток SSE, слоты моделей
-  llm.mjs         клиент к OpenAI-совместимым API: стриминг, повторы, отбрасывание неподдержанных параметров
+  llm.mjs         клиент к OpenAI-совместимым API: chat/completions и Responses API, стриминг, повторы,
+                  отбрасывание неподдержанных параметров, события трассы
+  log.mjs         логи: уровни, JSON или читаемый формат, трасса задачи, id запроса
   paywall.mjs     Pro-токены и конверты
   kit.mjs         общее для задач: InputError, проверка фото, базовая роль стилиста
   tasks.mjs       список задач из server/modules/*
   modules/<id>.mjs  серверная часть модуля: задачи и промпты
 worker/, netlify/, functions/, scripts/dev-server.mjs   обёртки для площадок, все зовут server/api.mjs
+scripts/logs.mjs   просмотр .logs/api.jsonl dev-сервера (npm run logs)
 ```
 
 ## 3. Модуль
@@ -66,13 +70,13 @@ export default defineModule({
   id: "looks", // как папка
   requires: ["profile", "wardrobe"], // чьи api.js можно импортировать; в modules.js они стоят раньше
   slice, // данные модуля, необязательно
-  route: { label: "Образы", order: 30, render }, // вкладка, необязательно; render(root, { param })
+  route: { label: "Образы", order: 30, render }, // вкладка, необязательно; render(root, { param }); visible() прячет её
   init() {}, // подписки на события, один раз после загрузки данных
   locked: { task, sealed(), unlock(full) }, // урезанный бесплатным планом результат, необязательно
 });
 ```
 
-Модуль, которого нет ни в одном `requires` (сейчас looks, search, settings), удаляется строкой в `modules.js` и папкой. Тест «модуль, который никто не требует, удаляется без поломки остальных» проверяет это.
+Модуль, которого нет ни в одном `requires` (сейчас looks, search, settings, logs), удаляется строкой в `modules.js` и папкой. Тест «модуль, который никто не требует, удаляется без поломки остальных» проверяет это.
 
 ## 4. Правила зависимостей
 
@@ -123,13 +127,14 @@ slice.save(); // запись через 50 мс, все изменённые с
 1. **API** (`api.js`): синхронные функции чтения и команды. Только для модулей из `requires`.
 2. **События** (`core/events.js`): `on(name, fn)`, `emit(name, payload)`. Упавший слушатель не мешает остальным.
 
-| Событие                 | Кто шлёт     | Кто слушает                            |
-| ----------------------- | ------------ | -------------------------------------- |
-| `wardrobe:item-removed` | wardrobe     | looks: убрать id из образов            |
-| `capsule:rebuilt`       | capsule      | search: очистить кэш                   |
-| `app:task-finished`     | core/tasks   | оболочка: перерисовать вкладку модуля  |
-| `app:data-replaced`     | core/store   | оболочка: перерисовать текущую вкладку |
-| `app:plan-changed`      | core/paywall | оболочка: кнопка Pro, перерисовка      |
+| Событие                 | Кто шлёт     | Кто слушает                                |
+| ----------------------- | ------------ | ------------------------------------------ |
+| `wardrobe:item-removed` | wardrobe     | looks: убрать id из образов                |
+| `capsule:rebuilt`       | capsule      | search: очистить кэш                       |
+| `app:task-finished`     | core/tasks   | оболочка: перерисовать вкладку модуля      |
+| `app:data-replaced`     | core/store   | оболочка: перерисовать текущую вкладку     |
+| `app:plan-changed`      | core/paywall | оболочка: кнопка Pro, вкладки, перерисовка |
+| `app:devlog`            | core/devlog  | logs: перерисовать журнал                  |
 
 3. **Хук `locked`** в манифесте: после покупки Pro `core/paywall.js` собирает конверты всех модулей и вскрывает их одним запросом.
 4. **Точки расширения** (мягкие зависимости, когда зависимость смотрела бы не в ту сторону) пока не нужны и не реализованы. Их добавит календарь (`tasks/T5`): `core/extensions.js` с `contribute(point, item)` из `init()`, `list(point)` с сортировкой по `order` (по умолчанию 100), повтор `(point, id)` бросает. Помощники `actionsHtml(point, key)` (`<div class="actions">` с кнопкой `<button type="button" class="btn small" data-point data-action data-key>` на каждый элемент или `""`) и `bindActions(container, point, resolve)`: один делегированный слушатель на контейнер, созданный текущим `render()` (не на `root`: оболочка переиспользует `<main>`, слушатели копились бы), `resolve(key)` читает данные карточки в момент клика и передаётся в `run` как есть, даже `null`.
