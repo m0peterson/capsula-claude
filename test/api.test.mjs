@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handleApi, resetRateLimits } from "../lib/api.mjs";
-import { resetLearned } from "../lib/llm.mjs";
-import { issueToken, verifyToken, seal, unseal, parseCodes, matchCode } from "../lib/paywall.mjs";
-import { canonicalSeason, teaserOf, TASKS } from "../lib/tasks.mjs";
-import { extractJson } from "../public/js/util.js";
+import { handleApi, resetRateLimits } from "../server/api.mjs";
+import { resetLearned } from "../server/llm.mjs";
+import { issueToken, verifyToken, seal, unseal, parseCodes, matchCode } from "../server/paywall.mjs";
+import { teaserOf, TASKS } from "../server/tasks.mjs";
+import { canonicalSeason } from "../server/modules/profile.mjs";
+import { extractJson } from "../public/js/lib/json.js";
 
 const IMG = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
 const PAID = { OPENROUTER_API_KEY: "srv-key", PRO_SECRET: "s3cret", PRO_CODES: "SPRING:7,VIP", ADMIN_CODE: "dev-42" };

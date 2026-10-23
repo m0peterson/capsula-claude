@@ -1,5 +1,7 @@
 # Calendar module: past and planned looks
 
+> **Статус (2026-10-22).** Написано до модульного рефакторинга. Ссылки на `target.md` и T1-T3 устарели: эти задачи выполнены, текущая архитектура в `docs/architecture/README.md`. Отличия от этого текста перечислены там в разделе «Календарь».
+
 Module id `calendar`. Built in T4 (pure domain) and T5 (module, UI, integration). T6 is an optional follow-up that feeds wear history into the stylist prompts.
 
 ## 1. What it does

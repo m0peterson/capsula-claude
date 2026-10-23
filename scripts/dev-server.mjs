@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { Readable, pipeline } from "node:stream";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleApi } from "../lib/api.mjs";
+import { handleApi } from "../server/api.mjs";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 const port = Number(process.env.PORT || 8888);

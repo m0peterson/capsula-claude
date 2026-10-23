@@ -1,67 +1,179 @@
-# Capsula: modular architecture and calendar
+# Capsula: архитектура
 
-Architecture for moving the client from one global state with tab views to feature modules on a small kernel, then adding a calendar of past and planned looks. Code is written by agents from the briefs in `tasks/`. This folder is the source of truth for those tasks.
+Приложение собрано из модулей. Модуль это одна функция продукта целиком: экран, данные, форма ответа модели, серверная задача с промптом и свои тесты. Агенту можно дать один модуль, и он не сломает остальные: границы проверяет `test/architecture.test.mjs`.
 
-> **Status (2026-10-22): partly superseded.** Prompts, model selection, the LLM client and the free/Pro boundary moved to the server (`lib/api.mjs`, `lib/tasks.mjs`, `lib/prompts.mjs`, `lib/llm.mjs`), and `POST /api/llm` is gone. The client now calls `POST /api/task` through `public/js/api.js`. `target.md` section 2 ("server side is out of scope, the client keeps calling `/api/llm`") and every brief that moves `llm.js`, `prompts.js`, provider settings or API-key UI into `public/js/ai/`, `core/settings.js` or module `prompts.js` files no longer match the code. Revise T1 to T3 before handing them to an agent. The calendar design (`calendar.md`, T4 to T6) is unaffected except that T6 must add wear history to the server-side prompt input, not to a client prompt.
+Сборки нет: браузер грузит ES-модули из `public/`, тесты `node --test`, Node 20+, без зависимостей.
 
-| File                                  | What it is                                                                                                                                         |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `target.md`                           | Target architecture: layers, import rules, module contract, storage and migration, events, extension points, invariants. Every brief refers to it. |
-| `calendar.md`                         | Design of the calendar module: data model, dates, domain functions, UI, integration, edge cases.                                                   |
-| `tasks/T1-foundation.md`              | Move pure helpers into `lib/`, `ai/`, `shared/`, `ui/`; decouple the LLM client from settings.                                                     |
-| `tasks/T2-kernel.md`                  | Kernel as new, Node-tested code: module contract, registry, slice store with legacy migration and backup v2, events, extension points.             |
-| `tasks/T3-cutover.md`                 | Features become modules; the app boots on the kernel; storage switches to per-module slices.                                                       |
-| `tasks/T4-calendar-core.md`           | Calendar domain without UI: dates, look snapshots, calendar functions.                                                                             |
-| `tasks/T5-calendar-module.md`         | Calendar module, UI, and integration with looks and capsule.                                                                                       |
-| `tasks/T6-wear-history-in-prompts.md` | Optional: wear history from the calendar in the stylist prompts.                                                                                   |
+## 1. Как направить агента на модуль
 
-## Task graph
+Модули: `profile`, `wardrobe`, `looks`, `capsule`, `search`, `settings`. У каждого есть `public/js/modules/<id>/README.md`: что внутри, данные, API, события, тесты.
+
+Шаблон задания:
 
 ```
-T1 foundation ──┬──────────────► T3 cutover ──┐
-T2 kernel ──────┘                             ├──► T5 calendar module ──► T6 (optional)
-T1 ─────────────► T4 calendar core ───────────┘
+Работай в модуле <id>: public/js/modules/<id>/ и server/modules/<id>.mjs.
+Сначала прочитай docs/architecture/README.md (разделы 3-7) и public/js/modules/<id>/README.md.
+Чужие модули не меняй. Если без этого нельзя, остановись и опиши, что нужно поменять в чужом api.js.
+Задача: <что сделать>.
+Готово, когда: npm test зелёный (включая test/architecture.test.mjs), README модуля описывает изменения,
+поведение проверено в браузере (npm run dev, Playwright с установленным Chromium).
 ```
 
-| Wave | Tasks that can run at the same time |
-| ---- | ----------------------------------- |
-| 1    | T1, T2                              |
-| 2    | T3 (needs T1 and T2), T4 (needs T1) |
-| 3    | T5 (needs T3 and T4)                |
-| 4    | T6, optional                        |
+Если задача про ядро (`core/`), про общий словарь (`shared/`) или про сервер вне `server/modules/`, это не задача модуля: давайте её отдельно и проверяйте внимательнее, её затронут все.
 
-T3 is the critical path and the largest task. It can't be split by feature: storage is shared by every feature, and cutting it over one feature at a time would mean running two storage systems side by side on real user data (see target.md section 11). Give it to your strongest agent and review it hardest.
-
-## Rules for every task
-
-1. **Read before coding.** The brief, then the sections of `target.md` and `calendar.md` it lists.
-2. **One task, one PR.** Branch from the default branch after the task's dependencies have merged. Don't stack tasks in one PR.
-3. **No behavior change unless the brief says so.** T1 to T3 are refactors; target.md section 9 lists the invariants.
-4. **No dependencies, no build step.** Native ES modules, `node --test`, Node 20+.
-5. **Match the codebase.** Russian comments and UI copy, the existing naming and comment density, Prettier with `.prettierrc` (print width 140). Use the exact Russian strings the docs give.
-6. **Tests before "done".** `npm test` green in every commit. Existing assertions don't change except where a brief says so. State the test count in the PR.
-7. **Browser check for UI work.** `npm run dev` plus the preinstalled Chromium and Playwright, with a throwaway script outside the repo. Report what you checked in the PR.
-8. **Deviations are flagged, not hidden.** If the docs are wrong or impossible, make the smallest sensible deviation and explain it in the PR under **Deviations from architecture**. If the deviation changes a contract other tasks rely on (anything in target.md sections 4 to 7 or calendar.md sections 3 to 6), stop and ask instead.
-9. **Out of scope means out of scope.** List bugs you find in the PR description; don't fix them on the side.
-
-## PR description template
+## 2. Слои
 
 ```
-## What
-<one paragraph>
-
-## Brief
-docs/architecture/tasks/<file>
-
-## Tests
-npm test: <N> passed. New tests: <list>.
-
-## Browser check
-<what you clicked, at which widths; screenshots for UI tasks>
-
-## Deviations from architecture
-<none, or each one with the reason>
-
-## Found but not fixed
-<bugs or smells outside the scope>
+public/js/
+  app.js          точка входа: запускает ядро со списком модулей и оболочку. Единственный файл, который трогает DOM при импорте
+  modules.js      список модулей в порядке загрузки. Единственный файл, который знает их все
+  lib/            чистые помощники: coerce (приведение типов), html (esc, safe*), json (разбор ответа модели), images, ids, plural
+  shared/         словарь предметной области: категории вещей, приоритеты, ошибка «неполный результат»
+  ui/             разметка без состояния: toast, swatches, thumb, emptyState, safeHtml
+  core/           ядро: контракт модуля, запуск, хранилище, события, долгие задачи, оболочка, API-клиент, настройки, Pro
+  modules/<id>/   модули
+  vendor/         jsonrepair
+server/
+  api.mjs         HTTP: маршруты, план (free/Pro), лимиты, поток SSE, слоты моделей
+  llm.mjs         клиент к OpenAI-совместимым API: стриминг, повторы, отбрасывание неподдержанных параметров
+  paywall.mjs     Pro-токены и конверты
+  kit.mjs         общее для задач: InputError, проверка фото, базовая роль стилиста
+  tasks.mjs       список задач из server/modules/*
+  modules/<id>.mjs  серверная часть модуля: задачи и промпты
+worker/, netlify/, functions/, scripts/dev-server.mjs   обёртки для площадок, все зовут server/api.mjs
 ```
+
+## 3. Модуль
+
+```
+public/js/modules/<id>/
+  README.md   что делает модуль, файлы, данные, API, зависимости, тесты. Первое, что читает агент
+  index.js    манифест (см. ниже). Импортирует его только modules.js
+  model.js    слайс данных и команды, которые его меняют. Без DOM
+  schema.js   форма ответа модели (normalize*). Общий с сервером, поэтому импортирует только lib/ и shared/
+  api.js      то, что могут читать и вызывать другие модули. Без DOM
+  view.js     экран
+  ...         прочие файлы модуля (например, wardrobe/outfits.js)
+server/modules/<id>.mjs   задачи модуля на сервере: validate, prompt, finish, teaser
+```
+
+Модуль без своих данных обходится без `model.js`, модуль, который никому ничего не даёт, без `api.js`, модуль без ИИ без `schema.js` и серверного файла.
+
+Манифест:
+
+```js
+export default defineModule({
+  id: "looks", // как папка
+  requires: ["profile", "wardrobe"], // чьи api.js можно импортировать; в modules.js они стоят раньше
+  slice, // данные модуля, необязательно
+  route: { label: "Образы", order: 30, render }, // вкладка, необязательно; render(root, { param })
+  init() {}, // подписки на события, один раз после загрузки данных
+  locked: { task, sealed(), unlock(full) }, // урезанный бесплатным планом результат, необязательно
+});
+```
+
+Модуль, которого нет ни в одном `requires` (сейчас looks, search, settings), удаляется строкой в `modules.js` и папкой. Тест «модуль, который никто не требует, удаляется без поломки остальных» проверяет это.
+
+## 4. Правила зависимостей
+
+Проверяются `test/architecture.test.mjs` по тексту импортов. Динамический `import()` запрещён.
+
+| Откуда                         | Можно импортировать                                                                                                                      |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/`                         | `lib/`, `vendor/`                                                                                                                        |
+| `shared/`                      | `lib/`, `shared/`                                                                                                                        |
+| `ui/`                          | `lib/`, `shared/`, `ui/`                                                                                                                 |
+| `core/`                        | `lib/`, `shared/`, `ui/`, `core/`. Конкретные модули ядро не знает                                                                       |
+| `modules/X/*`                  | `lib/`, `shared/`, `ui/`, `core/`, свою папку, `modules/Y/api.js`, если `Y` есть в `requires` X                                          |
+| `modules/X/schema.js`          | только `lib/` и `shared/`: его импортирует сервер                                                                                        |
+| `modules/X/api.js`, `model.js` | не `ui/` и не `view`, `tasks`, `shell`, `paywall`: их вызывают другие модули и тесты в Node                                              |
+| `modules.js`                   | `modules/*/index.js`                                                                                                                     |
+| `app.js`                       | `core/`, `modules.js`                                                                                                                    |
+| `server/modules/X.mjs`         | `server/kit.mjs`, `server/modules/Y.mjs` для `Y` из `requires` X, `public/js/lib/`, `public/js/shared/`, `public/js/modules/X/schema.js` |
+| остальной `server/`            | `server/`, `public/js/lib/`, `public/js/shared/`. Серверные модули подключает только `tasks.mjs`                                         |
+
+Ещё два правила, которые тест не видит:
+
+1. Модуль меняет чужие данные только командой из чужого `api.js`. Объекты, которые возвращает чужой API, живые (без копирования ради скорости): не меняйте их.
+2. Ни один файл, кроме `app.js`, не трогает `window`, `document`, `localStorage`, `indexedDB` при импорте. Тест импортирует каждый файл в чистом Node.
+
+## 5. Данные
+
+Всё хранится в браузере. IndexedDB `capsula`, хранилище `kv`, у каждого модуля свой ключ `mod:<id>` со значением `{ v, data }`. Настройки и Pro-токен в localStorage `capsula.settings.v1` (`core/settings.js`).
+
+```js
+export const slice = defineSlice("looks", {
+  version: 1,
+  initial: () => ({ list: [], lock: null }),
+  migrate(raw, { from, get, note }) {}, // любая форма на входе, валидные данные на выходе; get("wardrobe") — данные зависимости
+  fromLegacy: (state) => ({ list: state.looks }), // из общего блоба прошлой версии
+});
+slice.data; // живой объект, меняет только модуль-владелец
+slice.save(); // запись через 50 мс, все изменённые слайсы одной транзакцией
+```
+
+- **Загрузка** (`core/store.js`): слайсы в порядке `modules.js`, поэтому `migrate` видит уже загруженные зависимости. Если `migrate` бросил, слайс получает `initial()` с предупреждением в консоли, остальные целы.
+- **Прошлая версия** хранила всё одним ключом `state`. Если у слайса нет своего ключа, а `state` есть, данные берутся через `fromLegacy` и сразу пишутся по новому ключу. Сам `state` не трогается: после отката старая версия его прочитает. Удаляет его только «Удалить все данные».
+- **Копия** версии 2: `{ app, version: 2, exportedAt, slices: { <id>: { v, data } } }`. Импорт принимает и версию 1 (`{ state }` прошлой версии). Слайсы, которых нет в копии, не трогаются.
+- **IndexedDB недоступна**: работа в памяти с предупреждением.
+- **Новая версия данных модуля**: поднимите `version`, научите `migrate` читать старую форму (`from`), добавьте тест в `test/store.test.mjs`.
+
+## 6. Связь между модулями
+
+1. **API** (`api.js`): синхронные функции чтения и команды. Только для модулей из `requires`.
+2. **События** (`core/events.js`): `on(name, fn)`, `emit(name, payload)`. Упавший слушатель не мешает остальным.
+
+| Событие                 | Кто шлёт     | Кто слушает                            |
+| ----------------------- | ------------ | -------------------------------------- |
+| `wardrobe:item-removed` | wardrobe     | looks: убрать id из образов            |
+| `capsule:rebuilt`       | capsule      | search: очистить кэш                   |
+| `app:task-finished`     | core/tasks   | оболочка: перерисовать вкладку модуля  |
+| `app:data-replaced`     | core/store   | оболочка: перерисовать текущую вкладку |
+| `app:plan-changed`      | core/paywall | оболочка: кнопка Pro, перерисовка      |
+
+3. **Хук `locked`** в манифесте: после покупки Pro `core/paywall.js` собирает конверты всех модулей и вскрывает их одним запросом.
+4. **Точки расширения** (мягкие зависимости, когда зависимость смотрела бы не в ту сторону) пока не нужны и не реализованы. Их добавит календарь (`tasks/T5`): `core/extensions.js` с `contribute(point, item)` из `init()`, `list(point)` с сортировкой по `order` (по умолчанию 100), повтор `(point, id)` бросает. Помощники `actionsHtml(point, key)` (`<div class="actions">` с кнопкой `<button type="button" class="btn small" data-point data-action data-key>` на каждый элемент или `""`) и `bindActions(container, point, resolve)`: один делегированный слушатель на контейнер, созданный текущим `render()` (не на `root`: оболочка переиспользует `<main>`, слушатели копились бы), `resolve(key)` читает данные карточки в момент клика и передаётся в `run` как есть, даже `null`.
+
+## 7. Сервер
+
+Браузер шлёт только данные (`POST /api/task { task, input }`), промпт, модель и граница бесплатного плана живут на сервере. Задача в `server/modules/<id>.mjs`:
+
+| Поле        | Что это                                                                                                                      |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `slot`      | модель: `vision` (фото), `detect` (вещи на фото образов с рамками), `text`                                                   |
+| `pro`       | только Pro                                                                                                                   |
+| `webSearch` | нужен веб-поиск провайдера                                                                                                   |
+| `validate`  | вход в безопасную форму или `InputError` (текст увидит пользователь)                                                         |
+| `prompt`    | `{ system, user, images, expect, temperature?, extra? }`; картинка может быть `{ label, url }`, тогда подпись идёт перед ней |
+| `finish`    | ответ модели в форму интерфейса через `schema.js` модуля                                                                     |
+| `teaser`    | бесплатная часть `{ data, locked }`; полный результат уходит в конверт                                                       |
+
+Слоты задаются переменными `MODEL_<СЛОТ>`, `EFFORT_<СЛОТ>`, `MODEL_<СЛОТ>_FALLBACK` (см. корневой README).
+
+## 8. Новый модуль: чек-лист
+
+1. Папка `public/js/modules/<id>/` с `index.js`, `README.md` и нужными файлами из раздела 3.
+2. Строка в `modules.js` после модулей из `requires`.
+3. Если нужен ИИ: `server/modules/<id>.mjs` с задачами и импорт в `server/tasks.mjs`.
+4. Стили отдельным блоком с комментарием в `public/styles.css`, классы с префиксом модуля.
+5. Тесты: формы ответа, задача через `handleApi` с подменённым `fetch`, миграция данных.
+6. `npm test`, проверка в браузере.
+
+## 9. Инварианты
+
+1. Ответ модели нормализуется (мусор бросает), рисуется в строку, сохраняется, и только потом показывается, если узел ещё в документе. Плохой ответ не затирает хороший сохранённый результат. Сохранение внутри функции, переданной в `runTask`: после `runTask` оболочка уже перерисовала вкладку старыми данными.
+2. Одна задача на модуль. Вкладка, открытая во время расчёта, показывает `RUNNING_NOTE` и выключенную кнопку. Закончившаяся в фоне задача перерисовывает вкладку, но не пока пользователь печатает.
+3. Всё, что пришло от модели, из хранилища или из копии, выводится через `esc`, `safeImage`, `safeUrl`, `safeHex`.
+4. Тексты ошибок и интерфейса на русском, комментарии в коде на русском, Prettier с `.prettierrc` (ширина 140).
+
+## 10. Компромиссы
+
+- **Синглтоны вместо внедрения зависимостей.** Экземпляр всего один, тесты сбрасывают состояние через `resetForTests()`.
+- **Статический список модулей.** Без сборки нет поиска файлов по маске, одна строка на модуль явно и дёшево.
+- **Клиентская и серверная часть модуля в разных папках.** Промпты нельзя класть в `public/`: всё оттуда раздаётся браузеру. Связь держится именами: `public/js/modules/<id>/` и `server/modules/<id>.mjs`.
+- **Фото внутри слайсов.** Правка одной вещи переписывает весь гардероб с картинками. Вынести картинки в отдельные ключи можно потом.
+- **Нет типов и фреймворка.** Шаблонные строки и `innerHTML`, как раньше.
+
+## Календарь
+
+`calendar.md` и `tasks/T4-T6` написаны до этого рефакторинга, для старого плана (`target.md`, задачи T1-T3, которые выполнены этой структурой и удалены). Перед тем как отдавать их агенту, учтите отличия: `lib/plural.js` уже есть с сигнатурой `plural(n, one, few, many)`, точки расширения описаны в разделе 6 этого файла, промпты образов и капсулы на сервере (`server/modules/looks.mjs`, `capsule.mjs`), поэтому история носки из T6 идёт во вход серверной задачи, а не в клиентский промпт.

@@ -1,5 +1,5 @@
 // Cloudflare Worker со статикой: /api/* обрабатывает API, остальное отдаётся из public/ (см. wrangler.jsonc).
-import { handleApi } from "../lib/api.mjs";
+import { handleApi } from "../server/api.mjs";
 
 export default {
   async fetch(request, env) {

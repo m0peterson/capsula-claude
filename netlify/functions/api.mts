@@ -1,4 +1,4 @@
-import { handleApi } from "../../lib/api.mjs";
+import { handleApi } from "../../server/api.mjs";
 
 declare const Netlify: { env: { get(name: string): string | undefined } };
 

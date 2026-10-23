@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseModelJson, extractJson } from "../public/js/util.js";
+import { parseModelJson, extractJson } from "../public/js/lib/json.js";
 
 const ok = (text, expected, repaired = false) => {
   const r = parseModelJson(text);
