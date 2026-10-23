@@ -16,7 +16,7 @@ async function startServer(fixture = preload) {
   const port = 20000 + Math.floor(Math.random() * 20000);
   const child = spawn(process.execPath, ["--import", fixture, "scripts/dev-server.mjs"], {
     cwd: root,
-    env: { PATH: process.env.PATH, PORT: String(port), OPENROUTER_API_KEY: "k" },
+    env: { PATH: process.env.PATH, PORT: String(port), OPENROUTER_API_KEY: "k", DEV_VARS_FILE: "", LOG_FILE: "" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let exited = null;

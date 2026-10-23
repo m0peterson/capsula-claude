@@ -10,7 +10,8 @@
 // Раньше здесь был прокси /api/llm, который пересылал провайдеру любой запрос с серверным ключом. Через него
 // любой мог пользоваться ключом как бесплатным API, а промпты лежали в браузере. Теперь промпты, модель и
 // граница бесплатного плана живут только на сервере.
-import { PROVIDERS, EFFORTS, chatJson } from "./llm.mjs";
+import { PROVIDERS, EFFORTS, chatJson, imageInfo } from "./llm.mjs";
+import { startTrace, requestId, logSettings } from "./log.mjs";
 import { TASKS, InputError, teaserOf, LOCKABLE } from "./tasks.mjs";
 import { issueToken, verifyToken, parseCodes, matchCode, seal, unseal, safeEqual } from "./paywall.mjs";
 import { isRecord } from "../public/js/lib/coerce.js";
@@ -19,16 +20,30 @@ import { safeUrl } from "../public/js/lib/html.js";
 // Лимит тела запроса у Netlify Functions около 6 МБ.
 const MAX_BODY_BYTES = 5.5 * 1024 * 1024;
 
-// detect: вещи на фото образов с рамками. deepseek-v4.1-flash ставит рамки мимо вещей, а Gemini 3.8 Flash и Qwen 3.8 Flash
-// точно (замер октябрь 2026 на 6 фото образов: 10 вещей из 10, повторы склеены верно; Gemini 13 с, Qwen 30 с).
+// Muse Spark 1.3 Contributor во всех слотах: быстрый и дешёвый ($0.10 / $0.20 за 1M токенов на OpenRouter).
+// «Contributor» значит, что Meta учится на запросах: см. dataPolicy ниже и README, раздел «Модели».
+// Запасные модели на OpenRouter срабатывают, только если основная недоступна. Для detect запасная своя:
+// не каждая модель умеет ставить рамки (Qwen 3.8 Flash проверен: 10 вещей из 10).
 const DEFAULT_MODELS = {
   openrouter: {
-    model: "deepseek/deepseek-v4.1-flash",
+    model: "meta/muse-spark-1.3-contributor",
     fallback: "openai/gpt-6-luna",
-    detect: { model: "google/gemini-3.8-flash", fallback: "qwen/qwen3.8-flash" },
+    detect: { model: "meta/muse-spark-1.3-contributor", fallback: "qwen/qwen3.8-flash" },
   },
-  "opencode-go": { model: "deepseek-v4.1-flash", fallback: "", detect: { model: "deepseek-v4.1-flash", fallback: "" } },
+  "opencode-go": {
+    model: "muse-spark-1.3-contributor",
+    fallback: "",
+    detect: { model: "muse-spark-1.3-contributor", fallback: "" },
+  },
 };
+
+// Политика данных OpenRouter для модели. По умолчанию deny: только провайдеры, которые не учатся на запросах.
+// У моделей «-contributor» единственный провайдер учится на запросах, с deny OpenRouter отвечает «No endpoints
+// found matching your data policy», поэтому для них allow. OPENROUTER_DATA_COLLECTION задаёт политику явно.
+export function dataPolicy(cfg, model) {
+  if (cfg.dataCollection) return cfg.dataCollection;
+  return /-contributor\b/.test(model || "") ? "allow" : "deny";
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -46,25 +61,34 @@ export function readConfig(getEnv) {
   const keys = Object.fromEntries(Object.entries(PROVIDERS).map(([name, p]) => [name, getEnv(p.env) || ""]));
   let provider = getEnv("LLM_PROVIDER") || (keys.openrouter ? "openrouter" : keys["opencode-go"] ? "opencode-go" : "openrouter");
   if (!PROVIDERS[provider]) provider = "openrouter";
-  const d = DEFAULT_MODELS[provider];
   const effort = (v) => (EFFORTS.includes(v) ? v : "low");
   const maxTokens = Math.max(0, Math.floor(Number(getEnv("MAX_TOKENS") ?? 24000)) || 0);
-  // Фото разбираем с короткими рассуждениями: так стабильнее цветотип. Образы и капсулу без них: у deepseek-v4.1-flash
-  // рассуждения на одной и той же капсуле занимали от 2 до 7.6 тыс. токенов, то есть 31-54 секунды вместо 15-22.
+  // Самые быстрые провайдеры модели: на deepseek-v4.1-flash это убрало хвост в 40 секунд при той же цене.
+  const sort = ["price", "throughput", "latency"].includes(getEnv("OPENROUTER_SORT")) ? getEnv("OPENROUTER_SORT") : "throughput";
+  // Слоты провайдера. Переменные MODEL_*, EFFORT_* относятся к основному провайдеру: имена моделей у провайдеров разные.
+  // Фото разбираем с короткими рассуждениями (low): так стабильнее цветотип. Рамки и текст с minimal: Muse Spark
+  // не умеет без рассуждений (none он отклоняет), а minimal самый быстрый из допустимых.
   // MODEL_FALLBACK общий для фото и текста. У detect своя запасная модель: не каждая умеет ставить рамки.
-  const slot = (prefix, fallbackEffort, defaults = d) => ({
-    model: getEnv(`MODEL_${prefix}`) || defaults.model,
-    fallback: getEnv(`MODEL_${prefix}_FALLBACK`) ?? (defaults === d ? getEnv("MODEL_FALLBACK") : undefined) ?? defaults.fallback,
-    effort: effort(getEnv(`EFFORT_${prefix}`) ?? fallbackEffort),
-    maxTokens,
-    // Самые быстрые провайдеры модели: на deepseek-v4.1-flash это убрало хвост в 40 секунд при той же цене.
-    sort: ["price", "throughput", "latency"].includes(getEnv("OPENROUTER_SORT")) ? getEnv("OPENROUTER_SORT") : "throughput",
-  });
+  const slotsFor = (prov) => {
+    const d = DEFAULT_MODELS[prov];
+    const env = prov === provider ? getEnv : () => undefined;
+    const slot = (prefix, fallbackEffort, defaults = d) => ({
+      model: env(`MODEL_${prefix}`) || defaults.model,
+      fallback: env(`MODEL_${prefix}_FALLBACK`) ?? (defaults === d ? env("MODEL_FALLBACK") : undefined) ?? defaults.fallback,
+      effort: effort(env(`EFFORT_${prefix}`) ?? fallbackEffort),
+      maxTokens,
+      sort,
+    });
+    return { vision: slot("VISION", "low"), detect: slot("DETECT", "minimal", d.detect), text: slot("TEXT", "minimal") };
+  };
+  const slotsBy = Object.fromEntries(Object.keys(PROVIDERS).map((p) => [p, slotsFor(p)]));
+  const dc = getEnv("OPENROUTER_DATA_COLLECTION");
   return {
     provider,
     keys,
-    // У Gemini 3.8 Flash рассуждения не отключаются, minimal самый быстрый режим.
-    slots: { vision: slot("VISION", "low"), detect: slot("DETECT", "minimal", d.detect), text: slot("TEXT", "none") },
+    slots: slotsBy[provider],
+    slotsBy,
+    dataCollection: dc === "allow" || dc === "deny" ? dc : "",
     secret: getEnv("PRO_SECRET") || "",
     codes: parseCodes(getEnv("PRO_CODES")),
     admin: getEnv("ADMIN_CODE") || "",
@@ -73,8 +97,8 @@ export function readConfig(getEnv) {
   };
 }
 
-export function publicConfig(cfg) {
-  return {
+export function publicConfig(cfg, { admin = false, getEnv } = {}) {
+  const out = {
     ready: Boolean(cfg.keys[cfg.provider]),
     paywall: Boolean(cfg.secret),
     price: cfg.price,
@@ -82,6 +106,18 @@ export function publicConfig(cfg) {
     devCodes: Boolean(cfg.admin),
     webSearch: PROVIDERS[cfg.provider].webSearch,
   };
+  // Разработчику: какие провайдеры и модели стоят на сервере, чтобы настройки показывали их, а не «как на сервере».
+  if (admin) {
+    const slim = (slots) =>
+      Object.fromEntries(Object.entries(slots).map(([k, s]) => [k, { model: s.model, fallback: s.fallback, effort: s.effort }]));
+    out.dev = {
+      provider: cfg.provider,
+      providers: Object.keys(PROVIDERS).filter((p) => cfg.keys[p]),
+      slots: Object.fromEntries(Object.entries(cfg.slotsBy).map(([p, s]) => [p, slim(s)])),
+      logLevel: logSettings(getEnv || (() => undefined)).name,
+    };
+  }
+  return out;
 }
 
 // --- Ограничение частоты -------------------------------------------------------------------------------
@@ -102,6 +138,8 @@ function limited(bucket, ip, max, windowMs, now = Date.now()) {
   return false;
 }
 
+const recentHits = (bucket, ip, windowMs, now = Date.now()) => (hits.get(`${bucket}|${ip}`) || []).filter((t) => now - t < windowMs).length;
+
 const clientIp = (req) =>
   req.headers.get("cf-connecting-ip") ||
   req.headers.get("x-nf-client-connection-ip") ||
@@ -109,8 +147,22 @@ const clientIp = (req) =>
   "local";
 
 // --- План пользователя ----------------------------------------------------------------------------------
+// Код разработчика в заголовке. Неверный код это попытка подбора: после 10 неверных за 10 минут с одного IP
+// код не принимается вовсе, даже верный. Иначе /api/config, который отвечает разработчику иначе, стал бы
+// оракулом для перебора без ограничений.
+const ADMIN_GUESSES = 10;
+function isAdmin(req, cfg) {
+  const code = req.headers.get("x-admin-code") || "";
+  if (!cfg.admin || !code) return false;
+  const ip = clientIp(req);
+  if (recentHits("admin-guess", ip, 10 * 60 * 1000) >= ADMIN_GUESSES) return false;
+  if (safeEqual(code, cfg.admin)) return true;
+  limited("admin-guess", ip, ADMIN_GUESSES, 10 * 60 * 1000);
+  return false;
+}
+
 async function planOf(req, cfg) {
-  if (cfg.admin && safeEqual(req.headers.get("x-admin-code") || "", cfg.admin)) return { plan: "pro", admin: true };
+  if (isAdmin(req, cfg)) return { plan: "pro", admin: true };
   if (!cfg.secret) return { plan: "pro", open: true }; // платный доступ не настроен: пилот, всё открыто
   const t = await verifyToken(cfg.secret, req.headers.get("x-pro-token") || "");
   return t ? { plan: "pro", until: t.exp } : { plan: "free" };
@@ -121,22 +173,17 @@ const MODEL_RE = /^[\w.\-/:@]{1,100}$/;
 function devSlots(cfg, dev) {
   let provider = cfg.provider;
   if (isRecord(dev) && PROVIDERS[dev.provider] && cfg.keys[dev.provider]) provider = dev.provider;
-  const other = DEFAULT_MODELS[provider];
-  const base =
-    provider === cfg.provider
-      ? cfg.slots
-      : {
-          vision: { model: other.model, fallback: other.fallback, effort: "low", maxTokens: cfg.slots.vision.maxTokens },
-          detect: { ...other.detect, effort: "minimal", maxTokens: cfg.slots.vision.maxTokens },
-        };
+  const base = cfg.slotsBy[provider];
   const pick = (name) => {
-    const s = { ...(base[name] || base.vision) };
+    const s = { ...base[name] };
     const o = isRecord(dev) && isRecord(dev[name]) ? dev[name] : {};
     if (typeof o.model === "string" && MODEL_RE.test(o.model.trim())) {
       s.model = o.model.trim();
       s.fallback = "";
     }
-    if (typeof o.effort === "string" && EFFORTS.includes(o.effort)) s.effort = o.effort;
+    // Пустая строка в настройках браузера значит «как на сервере», а не «без рассуждений»: раньше она стирала
+    // серверный effort, и в режиме разработчика модели думали на уровне провайдера по умолчанию (в 5-10 раз дольше).
+    if (typeof o.effort === "string" && o.effort && EFFORTS.includes(o.effort)) s.effort = o.effort;
     return s;
   };
   return { provider, slots: { vision: pick("vision"), detect: pick("detect"), text: pick("text") } };
@@ -145,7 +192,7 @@ function devSlots(cfg, dev) {
 // --- Поток событий ----------------------------------------------------------------------------------------
 const encoder = new TextEncoder();
 
-function eventStream(req, work) {
+function eventStream(req, rid, work) {
   const ctl = new AbortController();
   const onAbort = () => ctl.abort();
   req.signal?.addEventListener?.("abort", onAbort);
@@ -167,9 +214,10 @@ function eventStream(req, work) {
       Promise.resolve()
         .then(() => work({ send, signal: ctl.signal }))
         .then(
-          (result) => send("result", result),
+          (result) => send("result", { ...result, rid }),
           (e) => {
-            if (e?.name !== "AbortError" || !ctl.signal.aborted) send("error", e?.payload || { message: e?.message || "Ошибка" });
+            if (e?.name !== "AbortError" || !ctl.signal.aborted)
+              send("error", { ...(e?.payload || { message: e?.message || "Ошибка" }), rid });
           },
         )
         .finally(() => {
@@ -193,12 +241,17 @@ function eventStream(req, work) {
     },
   });
   return new Response(stream, {
-    headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" },
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      "x-accel-buffering": "no",
+      "x-request-id": rid,
+    },
   });
 }
 
 // --- Обработчики ------------------------------------------------------------------------------------------
-async function runTask(req, body, cfg) {
+async function runTask(req, body, cfg, ctx) {
   const task = TASKS[body.task];
   if (!task) return fail(400, "Неизвестная задача");
   const who = await planOf(req, cfg);
@@ -225,11 +278,31 @@ async function runTask(req, body, cfg) {
   }
 
   const slot = { ...slots[task.slot] };
+  if (provider === "openrouter") slot.dataCollection = dataPolicy(cfg, slot.model);
   const p = task.prompt(clean);
   if (typeof p.temperature === "number") slot.temperature = p.temperature;
+  const rid = requestId();
 
-  return eventStream(req, async ({ send, signal }) => {
-    const started = Date.now();
+  return eventStream(req, rid, async ({ send, signal }) => {
+    const trace = startTrace({ rid, task: body.task, getEnv: ctx.getEnv, admin: who.admin, sink: ctx.log, send });
+    const images = (p.images || []).map((im) => imageInfo(typeof im === "string" ? im : im.url));
+    trace.emit("task.start", {
+      plan: who.plan,
+      admin: Boolean(who.admin),
+      provider,
+      slot: task.slot,
+      model: slot.model,
+      fallback: slot.fallback || "",
+      effort: slot.effort || "",
+      maxTokens: slot.maxTokens,
+      temperature: slot.temperature,
+      dataCollection: slot.dataCollection,
+      images: images.length ? images : undefined,
+      systemChars: p.system.length,
+      userChars: p.user.length,
+    });
+    trace.emit("task.prompt", { system: p.system, user: p.user });
+
     let last = 0;
     const onProgress = (pr) => {
       const now = Date.now();
@@ -237,6 +310,7 @@ async function runTask(req, body, cfg) {
       last = now;
       send("progress", pr);
     };
+    const summary = (extra) => trace.emit("task", { plan: who.plan, provider, model: slot.model, ms: trace.elapsed(), ...extra });
     let out;
     try {
       out = await chatJson({
@@ -249,17 +323,11 @@ async function runTask(req, body, cfg) {
         expect: p.expect || [],
         signal,
         onProgress,
-        onNotice: (m) => console.warn(`[${body.task}] ${m}`),
+        onNotice: (m) => trace.emit("notice", { message: m }),
+        trace: trace.emit,
       });
     } catch (e) {
-      log({
-        task: body.task,
-        plan: who.plan,
-        model: slot.model,
-        ms: Date.now() - started,
-        ok: false,
-        error: String(e?.message).slice(0, 200),
-      });
+      summary({ ok: false, error: e?.name === "AbortError" ? "отменено клиентом" : String(e?.message).slice(0, 300) });
       if (e?.name === "AbortError") throw e;
       // Сырой ответ модели нужен только разработчику, пользователю хватит понятного текста.
       e.payload = { message: e.message, truncated: Boolean(e.truncated), ...(who.admin ? { raw: e.raw, raw2: e.raw2 } : {}) };
@@ -269,11 +337,12 @@ async function runTask(req, body, cfg) {
     try {
       full = task.finish(out.data, clean, out);
     } catch (e) {
-      log({ task: body.task, plan: who.plan, model: slot.model, ms: Date.now() - started, ok: false, error: "shape" });
+      trace.emit("shape", { ok: false, error: e.message });
+      summary({ ok: false, model: out.model || slot.model, usage: usageOf(out.usage), error: `форма ответа: ${e.message}` });
       e.payload = { message: e.message, ...(who.admin ? { raw: JSON.stringify(out.data).slice(0, 20000) } : {}) };
       throw e;
     }
-    log({ task: body.task, plan: who.plan, model: out.model || slot.model, ms: Date.now() - started, ok: true, usage: usageOf(out.usage) });
+    summary({ ok: true, model: out.model || slot.model, served: out.served, usage: usageOf(out.usage) });
 
     if (who.plan === "pro") return { data: full, locked: null, sealed: null, plan: "pro" };
     const { data, locked } = teaserOf(body.task, full);
@@ -308,17 +377,13 @@ async function unlock(req, body, cfg) {
 const usageOf = (u) =>
   u ? { in: u.prompt_tokens, out: u.completion_tokens, reasoning: u.completion_tokens_details?.reasoning_tokens, cost: u.cost } : null;
 
-// Одна строка JSON на задачу: видно в логах Netlify и Cloudflare. Без персональных данных.
-function log(entry) {
-  console.log(JSON.stringify({ evt: "task", ...entry }));
-}
-
-export async function handleApi(req, getEnv) {
+// opts.log(entry): дополнительный приёмник событий трассы. dev-сервер пишет их в .logs/api.jsonl.
+export async function handleApi(req, getEnv, opts = {}) {
   const cfg = readConfig(getEnv);
   const path = new URL(req.url).pathname.replace(/\/+$/, "");
 
   if (req.method === "GET" || req.method === "HEAD") {
-    return path === "/api/config" ? json(publicConfig(cfg)) : fail(404, "Не найдено");
+    return path === "/api/config" ? json(publicConfig(cfg, { admin: isAdmin(req, cfg), getEnv })) : fail(404, "Не найдено");
   }
   if (req.method !== "POST") return fail(405, "Метод не поддерживается");
 
@@ -340,7 +405,7 @@ export async function handleApi(req, getEnv) {
   if (!isRecord(body)) return fail(400, "Тело запроса должно быть JSON-объектом");
 
   try {
-    if (path === "/api/task") return await runTask(req, body, cfg);
+    if (path === "/api/task") return await runTask(req, body, cfg, { getEnv, log: opts.log });
     if (path === "/api/activate") return await activate(req, body, cfg);
     if (path === "/api/unlock") return await unlock(req, body, cfg);
   } catch (e) {

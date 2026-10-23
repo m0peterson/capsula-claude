@@ -647,3 +647,159 @@ test(
     assert.equal(m.bodies.length, 2, "не больше одного повтора");
   }),
 );
+
+// --- Responses API (OpenCode Go: Muse Spark, GPT) ----------------------------------------------------------
+const rsse = (events) =>
+  new Response(events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+const rdone = (text, { status = "completed", reason = null, usage } = {}) =>
+  rsse([
+    { type: "response.created", response: { id: "resp_1", model: "muse-spark-1.3-contributor", status: "in_progress" } },
+    { type: "response.output_text.delta", delta: text.slice(0, 5) },
+    { type: "response.output_text.delta", delta: text.slice(5) },
+    {
+      type: status === "completed" ? "response.completed" : "response.incomplete",
+      response: {
+        status,
+        model: "muse-spark-1.3-contributor",
+        incomplete_details: reason ? { reason } : null,
+        usage: usage ?? { input_tokens: 100, output_tokens: 40, total_tokens: 140, output_tokens_details: { reasoning_tokens: 25 } },
+      },
+    },
+  ]);
+const go = { provider: "opencode-go", key: "oc" };
+const muse = () => ({ model: "muse-spark-1.3-contributor", effort: "low", maxTokens: 9000 });
+
+test(
+  "Muse Spark на OpenCode Go идёт через /responses: instructions, input_image, лимит, JSON-формат, store=false",
+  run(async () => {
+    const m = mockFetch(rdone('{"a":1}'));
+    const IMG = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+    const r = await chatJson({ endpoint: go, slot: muse(), system: "SYS", user: "вопрос", images: [{ label: "Фото 1:", url: IMG }] });
+    assert.deepEqual(r.data, { a: 1 });
+    assert.equal(m.calls[0].url, "https://opencode.ai/zen/go/v1/responses");
+    const b = m.bodies[0];
+    assert.equal(b.instructions, "SYS");
+    assert.deepEqual(b.input, [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "вопрос" },
+          { type: "input_text", text: "Фото 1:" },
+          { type: "input_image", image_url: IMG },
+        ],
+      },
+    ]);
+    assert.equal(b.max_output_tokens, 9000);
+    assert.deepEqual(b.reasoning, { effort: "low" });
+    assert.deepEqual(b.text, { format: { type: "json_object" } });
+    assert.equal(b.store, false);
+    assert.equal(b.messages, undefined);
+    assert.equal(b.response_format, undefined);
+    assert.deepEqual(r.usage, {
+      prompt_tokens: 100,
+      completion_tokens: 40,
+      total_tokens: 140,
+      completion_tokens_details: { reasoning_tokens: 25 },
+    });
+    assert.equal(r.protocol, "responses");
+  }),
+);
+
+test(
+  "Responses API: incomplete по лимиту это обрыв про токены, response.failed это ошибка провайдера",
+  run(async () => {
+    mockFetch(rdone('{"a":[1,2', { status: "incomplete", reason: "max_output_tokens" }));
+    await assert.rejects(
+      chatJson({ endpoint: go, slot: muse(), system: "S", user: "u" }),
+      (e) => e.truncated && /лимит токенов/.test(e.message),
+    );
+    mockFetch(
+      rsse([
+        { type: "response.output_text.delta", delta: "{" },
+        { type: "response.failed", response: { error: { message: "model overloaded" } } },
+      ]),
+    );
+    await assert.rejects(chatJson({ endpoint: go, slot: muse(), system: "S", user: "u" }), /model overloaded/);
+  }),
+);
+
+test(
+  "модель не понимает chat/completions: один раз переключаемся на /responses и запоминаем",
+  run(async () => {
+    const unsupported = () =>
+      new Response(
+        JSON.stringify({ type: "error", error: { type: "ModelProtocolUnsupported", message: "Model does not support this protocol." } }),
+        {
+          status: 400,
+        },
+      );
+    const m = mockFetch(unsupported(), rdone('{"a":1}'), rdone('{"a":2}'));
+    const slot = { model: "new-model-x", effort: "low", maxTokens: 100 };
+    assert.deepEqual((await chatJson({ endpoint: go, slot, system: "S", user: "u" })).data, { a: 1 });
+    assert.match(m.calls[0].url, /chat\/completions$/);
+    assert.match(m.calls[1].url, /\/responses$/);
+    assert.deepEqual((await chatJson({ endpoint: go, slot, system: "S", user: "u" })).data, { a: 2 });
+    assert.match(m.calls[2].url, /\/responses$/, "второй вызов сразу в нужный протокол");
+  }),
+);
+
+test(
+  "effort, который модель не знает, меняется на ближайший допустимый, а не выкидывается",
+  run(async () => {
+    const m = mockFetch(
+      errorResponse(
+        400,
+        "reasoning_effort 'none' is not supported for model 'muse-spark-1.3-contributor'. Supported values: [minimal, low, medium, high, xhigh, max]",
+      ),
+      rdone('{"a":1}'),
+    );
+    await chatJson({ endpoint: go, slot: { ...muse(), effort: "none" }, system: "S", user: "u" });
+    assert.deepEqual(m.bodies[1].reasoning, { effort: "minimal" });
+    const m2 = mockFetch(errorResponse(400, "Reasoning is mandatory for this endpoint and cannot be disabled."), jsonStream({ a: 1 }));
+    await chatJson({ endpoint, slot: { model: "meta/muse-spark-1.3-contributor", effort: "none" }, system: "S", user: "u" });
+    assert.deepEqual(m2.bodies[1].reasoning, { effort: "minimal" });
+  }),
+);
+
+test(
+  "трасса запроса: параметры без фото, статус, итог с токенами и сырой ответ",
+  run(async () => {
+    mockFetch(
+      sse([
+        {
+          id: "gen-1",
+          provider: "Meta",
+          model: "meta/muse-spark-1.3-contributor",
+          choices: [{ delta: { content: '{"a":1}' }, finish_reason: "stop" }],
+        },
+        { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.0001 } },
+      ]),
+    );
+    const events = [];
+    const IMG = "data:image/jpeg;base64," + "A".repeat(4096);
+    await chatJson({
+      endpoint,
+      slot: { model: "meta/muse-spark-1.3-contributor", effort: "low", dataCollection: "allow" },
+      system: "S",
+      user: "u",
+      images: [IMG],
+      trace: (type, data) => events.push({ type, ...data }),
+    });
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ["llm.request", "llm.response", "llm.done", "llm.raw", "parse"],
+    );
+    const [req, res, done, raw] = events;
+    assert.ok(!JSON.stringify(req).includes("AAAA"), "фото не попадает в лог");
+    assert.deepEqual(req.params.messages[1].images, ["jpeg 3 КБ"]);
+    assert.deepEqual(req.params.provider, { data_collection: "allow" });
+    assert.equal(res.status, 200);
+    assert.equal(done.served, "Meta");
+    assert.equal(done.id, "gen-1");
+    assert.deepEqual(done.usage, { prompt_tokens: 10, completion_tokens: 5, cost: 0.0001 });
+    assert.equal(raw.text, '{"a":1}');
+  }),
+);

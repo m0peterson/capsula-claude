@@ -154,8 +154,8 @@ test(
       assert.equal(r.data.items[1].same_as, "E1");
 
       const b = m.calls[0];
-      assert.equal(b.model, "google/gemini-3.8-flash");
-      assert.deepEqual(b.models, ["google/gemini-3.8-flash", "qwen/qwen3.8-flash"]);
+      assert.equal(b.model, "meta/muse-spark-1.3-contributor");
+      assert.deepEqual(b.models, ["meta/muse-spark-1.3-contributor", "qwen/qwen3.8-flash"]);
       assert.deepEqual(b.reasoning, { effort: "minimal" });
       assert.equal(b.temperature, 0);
       const parts = b.messages[1].content;
@@ -202,12 +202,12 @@ test(
       handleApi(req({ task: "outfits", input: { photos: [IMG] } }), env({ OPENROUTER_API_KEY: "k", ...vars })).then(resultOf);
     try {
       await call({ MODEL_FALLBACK: "openai/gpt-6-luna" });
-      assert.deepEqual(m.calls[0].models, ["google/gemini-3.8-flash", "qwen/qwen3.8-flash"], "запасная для рамок своя");
+      assert.deepEqual(m.calls[0].models, ["meta/muse-spark-1.3-contributor", "qwen/qwen3.8-flash"], "запасная для рамок своя");
       await call({ MODEL_DETECT: "qwen/qwen3.8-flash" });
       assert.equal(m.calls[1].model, "qwen/qwen3.8-flash");
       assert.equal(m.calls[1].models, undefined, "запасная совпадает с основной");
       await call({ MODEL_DETECT_FALLBACK: "" });
-      assert.equal(m.calls[2].model, "google/gemini-3.8-flash");
+      assert.equal(m.calls[2].model, "meta/muse-spark-1.3-contributor");
       assert.equal(m.calls[2].models, undefined, "пустая запасная модель отключает запасную");
     } finally {
       m.restore();

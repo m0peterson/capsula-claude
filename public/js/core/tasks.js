@@ -3,6 +3,7 @@
 import { esc } from "../lib/html.js";
 import { toast } from "../ui/components.js";
 import { emit } from "./events.js";
+import { devlogOn } from "./devlog.js";
 
 // Сырой ответ модели для отладки: начало и конец, чтобы видеть, обрезан ли он и чем испорчен.
 function rawDetails(e) {
@@ -12,6 +13,13 @@ function rawDetails(e) {
   return `<details class="raw"><summary>Показать ответ модели (${blocks.map(([, t]) => t.length).join(" и ")} зн.)</summary>${blocks
     .map(([title, t]) => `<p class="meta">${title}</p><pre>${esc(part(t))}</pre>`)
     .join("")}</details>`;
+}
+
+// Код запроса: по нему находится строка в логах сервера. В режиме разработчика ещё и ссылка на запись журнала.
+function ridLine(e) {
+  if (!e.rid) return "";
+  const link = devlogOn() ? ` · <a href="#logs/${esc(e.rid)}">открыть лог</a>` : "";
+  return `<p class="meta small">Код запроса: <code>${esc(e.rid)}</code>${link}</p>`;
 }
 
 // Какие модули сейчас считают. Нужно, чтобы экран, на который пользователь вернулся посреди расчёта,
@@ -58,7 +66,7 @@ export async function runTask(statusEl, buttons, fn) {
     statusEl.innerHTML =
       e.name === "AbortError"
         ? `<div class="note">Отменено.</div>`
-        : `<div class="error"><strong>Ошибка.</strong> ${esc(e.message)}${rawDetails(e)}</div>`;
+        : `<div class="error"><strong>Ошибка.</strong> ${esc(e.message)}${ridLine(e)}${rawDetails(e)}</div>`;
     return null;
   } finally {
     clearInterval(tick);

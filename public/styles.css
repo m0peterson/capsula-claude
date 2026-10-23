@@ -800,3 +800,65 @@ details.single-items summary {
   cursor: pointer;
   color: var(--muted);
 }
+
+/* Логи (режим разработчика) */
+.tag.run {
+  color: var(--accent);
+}
+.log-entry {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+}
+.log-entry > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.log-body {
+  padding: 0 14px 12px;
+}
+.log-timeline {
+  width: 100%;
+  border-collapse: collapse;
+  font:
+    0.8rem/1.4 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+}
+.log-timeline td {
+  padding: 3px 6px;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.log-timeline td:first-child {
+  white-space: nowrap;
+  color: var(--muted);
+  width: 1%;
+}
+.log-timeline tr.bad td:last-child {
+  color: var(--no);
+}
+.log-more {
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+.log-more summary {
+  cursor: pointer;
+}
+.log-more pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 420px;
+  overflow: auto;
+  background: var(--bg);
+  padding: 8px;
+  border-radius: 8px;
+  margin: 4px 0;
+  font-size: 0.8rem;
+}

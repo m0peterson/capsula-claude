@@ -153,7 +153,7 @@ test(
       assert.match(b.messages[1].content[0].text, /Рост, см: 168/);
       assert.equal(b.messages[1].content[1].image_url.url, IMG);
       assert.equal(b.temperature, 0);
-      assert.equal(b.model, "deepseek/deepseek-v4.1-flash");
+      assert.equal(b.model, "meta/muse-spark-1.3-contributor");
       assert.equal(m.calls[0].init.headers.authorization, "Bearer srv-key");
 
       // Купили Pro: конверт открывается без повторной генерации.
@@ -264,7 +264,7 @@ test(
           env(PAID),
         ),
       );
-      assert.deepEqual(m.calls[0].body.plugins, [{ id: "web", max_results: 5 }]);
+      assert.deepEqual(m.calls[0].body.plugins, [{ id: "web", engine: "exa", max_results: 5 }]);
       assert.equal(r.data.verified, true);
       assert.deepEqual(
         r.data.results.map((x) => x.title),
@@ -389,13 +389,23 @@ test(
       await resultOf(
         await handleApi(req("/api/task", { task: "analysis", input: { photos: [IMG] }, dev }, { "x-admin-code": "wrong" }), env(vars)),
       );
-      assert.equal(m.calls[0].body.model, "deepseek/deepseek-v4.1-flash");
+      assert.equal(m.calls[0].body.model, "meta/muse-spark-1.3-contributor");
       assert.match(m.calls[0].url, /openrouter/);
       await resultOf(
         await handleApi(req("/api/task", { task: "analysis", input: { photos: [IMG] }, dev }, { "x-admin-code": "dev-42" }), env(vars)),
       );
       assert.equal(m.calls[1].body.model, "glm-5.3-flash");
       assert.equal(m.calls[1].body.reasoning_effort, "none");
+      // Пустые поля из настроек браузера («как на сервере») не стирают серверные модель и effort.
+      const blank = { provider: "", vision: { model: "", effort: "" }, detect: { model: "", effort: "" }, text: { model: "", effort: "" } };
+      await resultOf(
+        await handleApi(
+          req("/api/task", { task: "analysis", input: { photos: [IMG] }, dev: blank }, { "x-admin-code": "dev-42" }),
+          env(vars),
+        ),
+      );
+      assert.equal(m.calls[2].body.model, "meta/muse-spark-1.3-contributor");
+      assert.deepEqual(m.calls[2].body.reasoning, { effort: "low" });
       assert.match(m.calls[1].url, /opencode\.ai/);
       assert.equal(m.calls[1].init.headers.authorization, "Bearer go-key");
     } finally {
@@ -405,7 +415,7 @@ test(
 );
 
 test(
-  "OpenRouter по умолчанию: быстрые провайдеры без хранения данных, запасная модель; образы без рассуждений",
+  "OpenRouter по умолчанию: Muse Spark с политикой allow, быстрые провайдеры, запасная модель, minimal effort",
   run(async () => {
     const m = mockFetch(() => sseOf(JSON.stringify({ looks: [{ name: "a", item_ids: ["w1", "w2"] }] })));
     try {
@@ -415,17 +425,29 @@ test(
       ];
       await resultOf(await handleApi(req("/api/task", { task: "looks", input: { wardrobe } }), env({ OPENROUTER_API_KEY: "k" })));
       const b = m.calls[0].body;
-      assert.deepEqual(b.provider, { data_collection: "deny", sort: "throughput" });
-      assert.deepEqual(b.models, ["deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"]);
-      assert.deepEqual(b.reasoning, { effort: "none" });
+      // Contributor-модели обучаются на запросах, с deny у них нет провайдера: политика allow ставится сама.
+      assert.deepEqual(b.provider, { data_collection: "allow", sort: "throughput" });
+      assert.deepEqual(b.models, ["meta/muse-spark-1.3-contributor", "openai/gpt-6-luna"]);
+      assert.deepEqual(b.reasoning, { effort: "minimal" });
       await resultOf(
         await handleApi(
           req("/api/task", { task: "looks", input: { wardrobe } }),
-          env({ OPENROUTER_API_KEY: "k", OPENROUTER_SORT: "price", MODEL_FALLBACK: "" }),
+          env({ OPENROUTER_API_KEY: "k", OPENROUTER_SORT: "price", MODEL_FALLBACK: "", MODEL_TEXT: "deepseek/deepseek-v4.1-flash" }),
         ),
       );
-      assert.deepEqual(m.calls[1].body.provider, { data_collection: "deny", sort: "price" });
+      assert.deepEqual(
+        m.calls[1].body.provider,
+        { data_collection: "deny", sort: "price" },
+        "обычная модель: только провайдеры без обучения",
+      );
       assert.equal(m.calls[1].body.models, undefined);
+      await resultOf(
+        await handleApi(
+          req("/api/task", { task: "looks", input: { wardrobe } }),
+          env({ OPENROUTER_API_KEY: "k", OPENROUTER_DATA_COLLECTION: "deny" }),
+        ),
+      );
+      assert.equal(m.calls[2].body.provider.data_collection, "deny", "явная политика сильнее умолчания");
     } finally {
       m.restore();
     }
